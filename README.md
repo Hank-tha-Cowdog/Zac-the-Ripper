@@ -1,5 +1,6 @@
 # Zac-the-Ripper
-# Zac the Ripper
+![zac_the_ripper](https://github.com/user-attachments/assets/680f4d54-2aa2-4374-8e25-1bb45efedbe4)
+
 
 A Python GUI tool for automated DVD archival with MakeMKV integration and H.265 conversion.
 
