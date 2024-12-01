@@ -55,7 +55,7 @@ pip install watchdog
 
 1. Launch the application:
 ```bash
-python zac_the_ripper.py
+python zac_the_ripper_v5_mkv+h265.py
 ```
 
 2. Configure the following settings:
