@@ -1,0 +1,50 @@
+appId: com.zactheripper.app
+productName: Zac the Ripper
+artifactName: "Zac-the-Ripper-${version}-${arch}.${ext}"
+directories:
+  buildResources: assets
+  output: dist
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+  - node_modules/better-sqlite3/**/*
+extraResources:
+  - from: "vendor/bin/${os}/${arch}/"
+    to: bin
+    filter:
+      - "**/*"
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  category: public.app-category.utilities
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  hardenedRuntime: true
+  gatekeeperAssess: false
+dmg:
+  window:
+    width: 540
+    height: 380
+  iconSize: 80
+  contents:
+    - x: 140
+      y: 190
+      type: file
+    - x: 400
+      y: 190
+      type: link
+      path: /Applications
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: AudioVideo
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64

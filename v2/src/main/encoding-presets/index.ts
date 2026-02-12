@@ -1,0 +1,282 @@
+import type { MediaInfo } from '../services/ffprobe'
+import { getSetting } from '../database/queries/settings'
+
+export interface EncodingContext {
+  mediaInfo: MediaInfo
+  preserveInterlaced: boolean
+  convertSubsToSrt: boolean
+}
+
+export function getEncodingArgs(preset: string, context: EncodingContext): string[] {
+  switch (preset) {
+    case 'ffv1':
+      return getFFV1Args(context)
+    case 'h264':
+      return getH264Args(context)
+    case 'hevc':
+      return getHEVCArgs(context)
+    default:
+      throw new Error(`Unknown encoding preset: ${preset}`)
+  }
+}
+
+function getFFV1Args(context: EncodingContext): string[] {
+  const { mediaInfo } = context
+  const video = mediaInfo.videoStreams[0]
+  const threads = getSetting('encoding.ffv1_threads') || '0'
+
+  const is10bit = video && (video.bitDepth > 8 || video.isHDR)
+  const pixFmt = is10bit ? 'yuv420p10le' : 'yuv420p'
+
+  return [
+    // Video: FFV1 lossless
+    '-c:v', 'ffv1',
+    '-level', '3',
+    '-slices', '24',
+    '-slicecrc', '1',
+    '-g', '1', // Every frame is a keyframe
+    '-pix_fmt', pixFmt,
+    '-threads', threads,
+    // Audio: FLAC lossless
+    '-c:a', 'flac',
+    // Subtitles: copy all
+    '-c:s', 'copy',
+    // Map all streams
+    '-map', '0'
+  ]
+}
+
+function getH264Args(context: EncodingContext): string[] {
+  const { mediaInfo, preserveInterlaced } = context
+  const video = mediaInfo.videoStreams[0]
+
+  const crf = getSetting('encoding.h264_crf') || '18'
+  const preset = getSetting('encoding.h264_preset') || 'slow'
+  const maxrate = getSetting('encoding.h264_maxrate') || '15M'
+  const bufsize = getSetting('encoding.h264_bufsize') || '30M'
+  const hwAccel = getSetting('encoding.hw_accel') || 'software'
+
+  const args: string[] = []
+  const vfFilters: string[] = []
+
+  // Handle interlacing (before scaling so yadif runs on source resolution)
+  if (video?.isInterlaced && !preserveInterlaced) {
+    vfFilters.push('yadif=0:-1:0')
+  }
+
+  // SD color space conversion: rec601 → rec709 for modern playback compatibility
+  const isSD = video && video.width <= 720
+  if (isSD && video.colorSpace && video.colorSpace !== 'bt709') {
+    const iall = video.colorPrimaries === 'bt470bg' ? 'bt601-6-625' : 'bt601-6-525'
+    vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
+  }
+
+  // Check if UHD needs downscaling to 1080p
+  const isUHD = video && (video.width > 1920 || video.height > 1080)
+  if (isUHD) {
+    // Use software scaling for chroma accuracy (VideoToolbox scaler has chroma position bugs)
+    vfFilters.push('scale=1920:-2:flags=lanczos')
+    if (video.isHDR) {
+      vfFilters.push('colorspace=all=bt709:iall=bt2020ncl')
+    }
+  }
+
+  // Apply video filters if any
+  if (vfFilters.length > 0) {
+    args.push('-vf', vfFilters.join(','))
+    if (isUHD || isSD) {
+      args.push('-sws_flags', 'spline+full_chroma_int+accurate_rnd')
+    }
+  }
+
+  // Interlaced passthrough flags (when preserving fields)
+  if (video?.isInterlaced && preserveInterlaced) {
+    args.push('-flags', '+ilme+ildct', '-top', '1')
+  }
+
+  // Video codec selection based on HW acceleration setting
+  switch (hwAccel) {
+    case 'videotoolbox':
+      // VideoToolbox: NO CRF support. Use -q:v (0-100, higher=better quality)
+      // -q:v 65 is roughly equivalent to CRF 18 in perceived quality
+      args.push(
+        '-c:v', 'h264_videotoolbox',
+        '-profile:v', 'high',
+        '-q:v', '65',
+        '-allow_sw', '1' // Fallback to software if HW encoder is busy
+      )
+      break
+
+    case 'nvenc':
+      args.push(
+        '-c:v', 'h264_nvenc',
+        '-preset', 'p7', // Slowest/best quality NVENC preset
+        '-cq', crf,
+        '-profile:v', 'high',
+        '-level:v', '5.1'
+      )
+      break
+
+    case 'qsv':
+      args.push(
+        '-c:v', 'h264_qsv',
+        '-global_quality', crf,
+        '-profile:v', 'high',
+        '-level', '51'
+      )
+      break
+
+    case 'vaapi':
+      args.push(
+        '-c:v', 'h264_vaapi',
+        '-qp', crf,
+        '-profile:v', '100', // High profile
+        '-level', '51'
+      )
+      break
+
+    default:
+      // Software libx264 — highest quality, most tuning options
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', preset,
+        '-crf', crf,
+        '-profile:v', 'high',
+        '-level:v', '5.1',
+        '-maxrate', maxrate,
+        '-bufsize', bufsize,
+        '-movflags', '+faststart'
+      )
+      break
+  }
+
+  // Audio: passthrough (preserve original AC3/DTS/TrueHD)
+  args.push('-c:a', 'copy')
+
+  // Subtitles: copy as soft subs (not burned in)
+  args.push('-c:s', 'copy')
+
+  // Map all streams
+  args.push('-map', '0')
+
+  return args
+}
+
+function getHEVCArgs(context: EncodingContext): string[] {
+  const { mediaInfo, preserveInterlaced } = context
+  const video = mediaInfo.videoStreams[0]
+
+  const quality = getSetting('encoding.hevc_quality') || '65'
+  const hwAccel = getSetting('encoding.hw_accel') || 'videotoolbox'
+  const crf = getSetting('encoding.h264_crf') || '18' // Used as CRF fallback for software/nvenc/qsv/vaapi
+
+  const args: string[] = []
+  const vfFilters: string[] = []
+
+  // Determine if 10-bit / HDR content
+  const is10bit = video && (video.bitDepth > 8 || video.isHDR)
+  const profileName = is10bit ? 'main10' : 'main'
+
+  // Handle interlacing (before scaling so yadif runs on source resolution)
+  if (video?.isInterlaced && !preserveInterlaced) {
+    vfFilters.push('yadif=0:-1:0')
+  }
+
+  // SD color space conversion: rec601 → rec709 for modern playback compatibility
+  const isSD = video && video.width <= 720
+  if (isSD && video.colorSpace && video.colorSpace !== 'bt709') {
+    const iall = video.colorPrimaries === 'bt470bg' ? 'bt601-6-625' : 'bt601-6-525'
+    vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
+  }
+
+  // Check if UHD needs downscaling to 1080p
+  const isUHD = video && (video.width > 1920 || video.height > 1080)
+  if (isUHD) {
+    vfFilters.push('scale=1920:-2:flags=lanczos')
+    if (video.isHDR) {
+      vfFilters.push('colorspace=all=bt709:iall=bt2020ncl')
+    }
+  }
+
+  // Apply video filters if any
+  if (vfFilters.length > 0) {
+    args.push('-vf', vfFilters.join(','))
+    if (isUHD || isSD) {
+      args.push('-sws_flags', 'spline+full_chroma_int+accurate_rnd')
+    }
+  }
+
+  // Interlaced passthrough flags
+  if (video?.isInterlaced && preserveInterlaced) {
+    args.push('-flags', '+ilme+ildct', '-top', '1')
+  }
+
+  // Video codec selection based on HW acceleration setting
+  switch (hwAccel) {
+    case 'videotoolbox':
+      args.push(
+        '-c:v', 'hevc_videotoolbox',
+        '-q:v', quality,
+        '-tag:v', 'hvc1',
+        '-profile:v', profileName,
+        '-allow_sw', '1'
+      )
+      break
+
+    case 'nvenc':
+      args.push(
+        '-c:v', 'hevc_nvenc',
+        '-preset', 'p7',
+        '-cq', crf,
+        '-profile:v', profileName,
+        '-tag:v', 'hvc1'
+      )
+      break
+
+    case 'qsv':
+      args.push(
+        '-c:v', 'hevc_qsv',
+        '-global_quality', crf,
+        '-profile:v', profileName
+      )
+      break
+
+    case 'vaapi':
+      args.push(
+        '-c:v', 'hevc_vaapi',
+        '-qp', crf,
+        '-profile:v', profileName
+      )
+      break
+
+    default:
+      // Software libx265
+      args.push(
+        '-c:v', 'libx265',
+        '-preset', getSetting('encoding.h264_preset') || 'slow',
+        '-crf', crf,
+        '-profile:v', profileName,
+        '-tag:v', 'hvc1'
+      )
+      // Pass HDR metadata through for 10-bit software encode
+      if (is10bit && video) {
+        args.push('-x265-params', [
+          `colorprim=${video.colorPrimaries || 'bt2020'}`,
+          `transfer=${video.colorTransfer || 'smpte2084'}`,
+          `colormatrix=${video.colorSpace || 'bt2020nc'}`
+        ].join(':'))
+      }
+      break
+  }
+
+  // Audio: passthrough (preserve original AC3/DTS/TrueHD)
+  args.push('-c:a', 'copy')
+
+  // Subtitles: copy as soft subs (not burned in)
+  args.push('-c:s', 'copy')
+
+  // Map all streams
+  args.push('-map', '0')
+
+  return args
+}

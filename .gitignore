@@ -1,0 +1,36 @@
+# Dependencies
+v2/node_modules/
+
+# Build output
+v2/out/
+v2/dist/
+v2/build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Python (v1)
+v1/__pycache__/
+v1/*.pyc
+v1/output/
+v1/venv/
+
+# Electron
+v2/*.dmg
+v2/*.app
+v2/*.exe
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,288 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Zac the Ripper Design System — ported from downlynk "Dark Industrial Engineering" */
+
+@layer base {
+  body {
+    @apply bg-void text-zinc-100 font-sans overflow-hidden;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-screen overflow-hidden;
+  }
+}
+
+@layer components {
+  /* Typography */
+  .label-tech {
+    @apply text-[9px] font-bold text-zinc-500 uppercase tracking-[0.15em] font-mono;
+  }
+
+  .label-ui {
+    @apply text-[10px] font-bold text-zinc-500 uppercase tracking-widest;
+  }
+
+  /* Buttons */
+  .btn-primary {
+    @apply bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded font-medium transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-100 px-4 py-2 rounded font-medium transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply text-zinc-400 hover:text-cyan-400 px-2 py-1 transition-colors duration-200;
+  }
+
+  .btn-danger {
+    @apply bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30 px-4 py-2 rounded font-medium transition-colors duration-200;
+  }
+
+  /* Cards */
+  .card {
+    @apply bg-zinc-900/50 border border-zinc-800 rounded-lg hover:border-purple-500/50 transition-colors duration-200;
+  }
+
+  .card-solid {
+    @apply bg-zinc-900 border border-zinc-800 rounded-lg;
+  }
+
+  /* Modal */
+  .modal-overlay {
+    @apply fixed inset-0 bg-black/60 backdrop-blur-sm z-50;
+  }
+
+  .modal-content {
+    @apply bg-zinc-900/95 backdrop-blur border border-zinc-800 rounded-lg z-50;
+  }
+
+  /* Badge */
+  .badge {
+    @apply bg-purple-500/10 text-purple-400 text-[10px] font-bold tracking-widest uppercase px-2 py-1 rounded;
+  }
+
+  .badge-success {
+    @apply bg-emerald-500/10 text-emerald-500;
+  }
+
+  .badge-warning {
+    @apply bg-amber-500/10 text-amber-500;
+  }
+
+  .badge-error {
+    @apply bg-red-500/10 text-red-500;
+  }
+
+  .badge-info {
+    @apply bg-blue-500/10 text-blue-400;
+  }
+
+  /* Input */
+  .input {
+    @apply bg-zinc-900 border border-zinc-800 text-zinc-100 px-3 py-2 rounded focus:outline-none focus:border-purple-500 transition-colors duration-200 placeholder-zinc-600;
+  }
+
+  /* Select */
+  .select {
+    @apply bg-zinc-900 border border-zinc-800 text-zinc-100 px-3 py-2 rounded focus:outline-none focus:border-purple-500 transition-colors duration-200 appearance-none cursor-pointer;
+  }
+
+  /* Tooltip */
+  .tooltip-bubble {
+    @apply block bg-zinc-800 border border-zinc-700 text-zinc-200 text-[11px] leading-snug px-2.5 py-1.5 rounded shadow-lg max-w-[260px] whitespace-normal;
+    animation: tooltip-in 0.15s ease-out;
+  }
+
+  /* Data grid */
+  .data-grid {
+    @apply grid grid-cols-2 gap-x-4 gap-y-1;
+  }
+
+  .data-label {
+    @apply label-tech text-right;
+  }
+
+  .data-value {
+    @apply text-xs font-mono text-zinc-100;
+  }
+
+  /* Timecode */
+  .timecode {
+    @apply font-mono text-lg text-purple-400 tabular-nums;
+  }
+}
+
+@layer utilities {
+  .text-shadow {
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(63 63 70) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgb(63 63 70);
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(82 82 91);
+  }
+}
+
+/* Animated status indicators */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.95); }
+}
+
+@keyframes status-glow {
+  0%, 100% { box-shadow: 0 0 4px currentColor; }
+  50% { box-shadow: 0 0 12px currentColor, 0 0 20px currentColor; }
+}
+
+@keyframes progress-fill {
+  from { width: 0%; }
+}
+
+@keyframes progress-stripe {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 0; }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fadeIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@keyframes tooltip-in {
+  0% { opacity: 0; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes rip-glow {
+  0%   { text-shadow: 0 0 4px rgb(168 85 247 / 0.4); }
+  25%  { text-shadow: 0 0 8px rgb(168 85 247 / 0.6), 0 0 14px rgb(168 85 247 / 0.25); }
+  50%  { text-shadow: 0 0 14px rgb(168 85 247 / 0.8), 0 0 24px rgb(168 85 247 / 0.4); }
+  75%  { text-shadow: 0 0 8px rgb(168 85 247 / 0.6), 0 0 14px rgb(168 85 247 / 0.25); }
+  100% { text-shadow: 0 0 4px rgb(168 85 247 / 0.4); }
+}
+
+@keyframes rip-button-glow {
+  0%   { box-shadow: 0 0 6px rgb(168 85 247 / 0.2), inset 0 0 6px rgb(168 85 247 / 0.05); }
+  25%  { box-shadow: 0 0 12px rgb(168 85 247 / 0.35), 0 0 24px rgb(168 85 247 / 0.1), inset 0 0 8px rgb(168 85 247 / 0.08); }
+  50%  { box-shadow: 0 0 20px rgb(168 85 247 / 0.5), 0 0 40px rgb(168 85 247 / 0.2), inset 0 0 12px rgb(168 85 247 / 0.12); }
+  75%  { box-shadow: 0 0 12px rgb(168 85 247 / 0.35), 0 0 24px rgb(168 85 247 / 0.1), inset 0 0 8px rgb(168 85 247 / 0.08); }
+  100% { box-shadow: 0 0 6px rgb(168 85 247 / 0.2), inset 0 0 6px rgb(168 85 247 / 0.05); }
+}
+
+.animate-rip-text {
+  animation: rip-glow 2.5s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+.animate-rip-button {
+  animation: rip-button-glow 2.5s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* Status dots */
+.status-dot {
+  @apply w-2 h-2 rounded-full;
+}
+
+.status-dot-pending {
+  @apply bg-zinc-600;
+}
+
+.status-dot-processing {
+  @apply bg-amber-500;
+  animation: status-pulse 1.5s ease-in-out infinite, status-glow 1.5s ease-in-out infinite;
+}
+
+.status-dot-ready {
+  @apply bg-emerald-500;
+  animation: ready-pulse 2.5s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+@keyframes ready-pulse {
+  0%   { box-shadow: 0 0 4px rgb(16 185 129 / 0.3); }
+  25%  { box-shadow: 0 0 6px rgb(16 185 129 / 0.45); }
+  50%  { box-shadow: 0 0 10px rgb(16 185 129 / 0.6), 0 0 18px rgb(16 185 129 / 0.25); }
+  75%  { box-shadow: 0 0 6px rgb(16 185 129 / 0.45); }
+  100% { box-shadow: 0 0 4px rgb(16 185 129 / 0.3); }
+}
+
+.status-dot-failed {
+  @apply bg-red-500;
+  box-shadow: 0 0 6px rgb(239 68 68 / 0.5);
+}
+
+/* Progress bar */
+.progress-bar {
+  @apply h-1 bg-zinc-800 rounded-full overflow-hidden;
+}
+
+.progress-bar-fill {
+  @apply h-full rounded-full transition-all duration-300 ease-out;
+}
+
+.progress-bar-fill-purple {
+  @apply bg-purple-500;
+}
+
+.progress-bar-fill-amber {
+  @apply bg-amber-500;
+}
+
+.progress-bar-fill-emerald {
+  @apply bg-emerald-500;
+}
+
+.progress-bar-striped {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.1) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0.1) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 40px 40px;
+  animation: progress-stripe 1s linear infinite;
+}
+
+/* Spinner */
+.animate-spin-slow {
+  animation: spin-slow 2s linear infinite;
+}
+
+/* Electron frameless window drag region */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
