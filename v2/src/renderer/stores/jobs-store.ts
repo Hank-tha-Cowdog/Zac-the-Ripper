@@ -11,6 +11,13 @@ interface JobProgress {
   eta?: string
   outputFiles?: string[]
   error?: string
+  movieTitle?: string
+  movieYear?: string
+  collectionName?: string
+  edition?: string
+  soundVersion?: string
+  discNumber?: number
+  totalDiscs?: number
 }
 
 interface LogEntry {

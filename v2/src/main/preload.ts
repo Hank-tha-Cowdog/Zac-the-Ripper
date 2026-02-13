@@ -10,7 +10,10 @@ const api = {
     detect: () => ipcRenderer.invoke(IPC.DISC_DETECT),
     getInfo: (discIndex: number) => ipcRenderer.invoke(IPC.DISC_INFO, discIndex),
     getInfoCached: (discId: string) => ipcRenderer.invoke(IPC.DISC_INFO_CACHED, discId),
-    setTmdbCache: (discId: string, tmdbResult: unknown) => ipcRenderer.invoke(IPC.DISC_TMDB_CACHE_SET, discId, tmdbResult)
+    setTmdbCache: (discId: string, tmdbResult: unknown) => ipcRenderer.invoke(IPC.DISC_TMDB_CACHE_SET, discId, tmdbResult),
+    eject: (driveIndex: number) => ipcRenderer.invoke(IPC.DISC_EJECT, driveIndex),
+    startStream: (discIndex: number) => ipcRenderer.invoke(IPC.DISC_STREAM_START, discIndex),
+    stopStream: () => ipcRenderer.invoke(IPC.DISC_STREAM_STOP)
   },
 
   // Rip operations
@@ -114,6 +117,11 @@ const api = {
     check: () => ipcRenderer.invoke(IPC.TOOLS_CHECK),
     test: (toolName: string, toolPath: string) => ipcRenderer.invoke(IPC.TOOLS_TEST, toolName, toolPath),
     detectMakeMKV: () => ipcRenderer.invoke(IPC.TOOLS_DETECT_MAKEMKV)
+  },
+
+  // Notifications
+  notify: {
+    test: () => ipcRenderer.invoke(IPC.NOTIFY_TEST)
   },
 
   // App info

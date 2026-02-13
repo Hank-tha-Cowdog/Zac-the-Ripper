@@ -23,6 +23,12 @@ export function DashboardPage() {
     })
   }
 
+  const handleEject = async (driveIndex: number) => {
+    await window.ztr.disc.eject(driveIndex)
+    // Re-scan drives to update the UI (disc will be gone)
+    scan()
+  }
+
   // Build disc info summary for dashboard display
   const buildDiscInfoSummary = (driveIndex: number) => {
     if (driveIndex !== selectedDrive || !discInfo) return null
@@ -60,6 +66,7 @@ export function DashboardPage() {
                 drive={drive}
                 onScan={handleScan}
                 onRip={handleRip}
+                onEject={handleEject}
                 tmdbPosterPath={drive.index === selectedDrive ? tmdbResult?.poster_path : undefined}
                 tmdbTitle={drive.index === selectedDrive ? tmdbResult?.title : undefined}
                 tmdbYear={drive.index === selectedDrive ? tmdbResult?.year : undefined}

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { Disc3, AlertTriangle, Film, Music, Subtitles, Clock, Star } from 'lucide-react'
-import { Card, Badge, Spinner, Tooltip } from '../ui'
+import { Disc3, AlertTriangle, Film, Music, Subtitles, Clock, Star, RefreshCw } from 'lucide-react'
+import { Card, Badge, Spinner, Tooltip, Button } from '../ui'
 import { useDiscStore } from '../../stores/disc-store'
 
 function getVideoStandard(framerate: string): { label: string; tooltip: string } {
@@ -31,7 +31,11 @@ function summarizeAudio(tracks: Array<{ codec: string; language: string; channel
   return `${tracks.length} track${tracks.length > 1 ? 's' : ''} (${langs.join(', ')}) ${mainCodec} ${mainCh}`
 }
 
-export function DiscInfoCard() {
+interface DiscInfoCardProps {
+  onRescan?: () => void
+}
+
+export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
   const { discInfo, loading, tmdbResult } = useDiscStore()
   const [tmdbKeyMissing, setTmdbKeyMissing] = useState(false)
 
@@ -56,6 +60,30 @@ export function DiscInfoCard() {
         <Disc3 className="w-8 h-8 text-zinc-700 mb-2" />
         <span className="text-sm text-zinc-500">No disc loaded</span>
         <span className="text-xs text-zinc-600 mt-1">Insert a disc to start scanning automatically</span>
+        {onRescan && (
+          <Button variant="ghost" size="sm" className="mt-3" onClick={onRescan}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+            Rescan Drive
+          </Button>
+        )}
+      </Card>
+    )
+  }
+
+  if (discInfo.trackCount === 0) {
+    return (
+      <Card className="flex flex-col items-center justify-center p-8 text-center">
+        <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
+        <span className="text-sm text-zinc-400">Disc detected but no tracks found</span>
+        <span className="text-xs text-zinc-600 mt-1">
+          The drive may still be spinning up. Try rescanning.
+        </span>
+        {onRescan && (
+          <Button variant="ghost" size="sm" className="mt-3" onClick={onRescan}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+            Rescan Drive
+          </Button>
+        )}
       </Card>
     )
   }
@@ -87,6 +115,13 @@ export function DiscInfoCard() {
           <div className="flex items-center gap-2 flex-wrap">
             <Disc3 className="w-4 h-4 text-purple-400 shrink-0" />
             <h3 className="text-sm font-semibold text-zinc-100 truncate">{discInfo.title}</h3>
+            {onRescan && (
+              <Tooltip content="Rescan disc drive">
+                <button onClick={onRescan} className="ml-auto p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
+            )}
           </div>
 
           {/* Badges row */}
@@ -96,7 +131,7 @@ export function DiscInfoCard() {
             </Tooltip>
             {resolution && (
               <Tooltip content={isInterlaced
-                ? `Interlaced source (${resolution}). Will be deinterlaced with yadif during encode.`
+                ? `Interlaced source (${resolution}). Interlaced flags preserved during encode.`
                 : `Progressive scan at ${resolution}.`
               }>
                 <Badge variant={isInterlaced ? 'warning' : 'info'}>

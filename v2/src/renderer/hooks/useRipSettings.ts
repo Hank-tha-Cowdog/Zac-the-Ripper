@@ -10,8 +10,7 @@ import { useDiscStore, type DiscSessionState } from '../stores/disc-store'
  *   kodiMediaType, kodiEdition, kodiCustomEdition, kodiIsExtrasDisc
  *
  * Disc-session values (reset when disc changes):
- *   kodiTitle, kodiYear, kodiTmdbId, kodiSetName, kodiSetOverview,
- *   discSetId, discNumber
+ *   kodiTitle, kodiYear, kodiTmdbId, kodiSetName, kodiSetOverview
  */
 export function useRipSettings() {
   const { settings, saveSetting } = useSettings()
@@ -24,7 +23,9 @@ export function useRipSettings() {
     raw_capture: settings['general.mode_raw_capture'] === 'true',
     ffv1_archival: settings['general.mode_ffv1_archival'] === 'true',
     streaming_encode: settings['general.mode_streaming_encode'] === 'true',
-    kodi_export: settings['general.mode_kodi_export'] === 'true'
+    kodi_export: settings['general.mode_kodi_export'] === 'true',
+    jellyfin_export: settings['general.mode_jellyfin_export'] === 'true',
+    plex_export: settings['general.mode_plex_export'] === 'true'
   }
 
   const setModes = useCallback(
@@ -58,7 +59,9 @@ export function useRipSettings() {
     raw_capture: settings['paths.raw_output'] || '',
     ffv1_archival: settings['paths.ffv1_output'] || '',
     streaming_encode: settings['paths.streaming_output'] || '',
-    kodi_export: settings['kodi.library_path'] || ''
+    kodi_export: settings['kodi.library_path'] || '',
+    jellyfin_export: settings['jellyfin.library_path'] || '',
+    plex_export: settings['plex.library_path'] || ''
   }
 
   const pathKeyMap: Record<string, string> = {
@@ -66,7 +69,9 @@ export function useRipSettings() {
     raw_capture: 'paths.raw_output',
     ffv1_archival: 'paths.ffv1_output',
     streaming_encode: 'paths.streaming_output',
-    kodi_export: 'kodi.library_path'
+    kodi_export: 'kodi.library_path',
+    jellyfin_export: 'jellyfin.library_path',
+    plex_export: 'plex.library_path'
   }
 
   const setOutputPath = useCallback(
@@ -123,10 +128,30 @@ export function useRipSettings() {
     (v: string) => updateDiscSession({ kodiSetOverview: v }),
     [updateDiscSession]
   )
-  const setDiscSetId = useCallback(
-    (id: number | null, num: number | null) =>
-      updateDiscSession({ discSetId: id, discNumber: num }),
-    [updateDiscSession]
+
+  // --- Persistent: sound version + disc number ---
+  const soundVersion = settings['rip.sound_version'] || ''
+  const setSoundVersion = useCallback(
+    (v: string) => saveSetting('rip.sound_version', v),
+    [saveSetting]
+  )
+
+  const customSoundVersion = settings['rip.custom_sound_version'] || ''
+  const setCustomSoundVersion = useCallback(
+    (v: string) => saveSetting('rip.custom_sound_version', v),
+    [saveSetting]
+  )
+
+  const discNumber = settings['rip.disc_number'] || ''
+  const setDiscNumber = useCallback(
+    (v: string) => saveSetting('rip.disc_number', v),
+    [saveSetting]
+  )
+
+  const totalDiscs = settings['rip.total_discs'] || ''
+  const setTotalDiscs = useCallback(
+    (v: string) => saveSetting('rip.total_discs', v),
+    [saveSetting]
   )
 
   return {
@@ -159,8 +184,13 @@ export function useRipSettings() {
     setKodiSetName,
     kodiSetOverview: discSession.kodiSetOverview,
     setKodiSetOverview,
-    discSetId: discSession.discSetId,
-    discNumber: discSession.discNumber,
-    setDiscSetId
+    soundVersion,
+    setSoundVersion,
+    customSoundVersion,
+    setCustomSoundVersion,
+    discNumber,
+    setDiscNumber,
+    totalDiscs,
+    setTotalDiscs
   }
 }

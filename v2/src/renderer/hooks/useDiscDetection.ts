@@ -110,15 +110,15 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
     console.warn('[useDiscDetection] TMDB returned no results for any query variant')
   }, [])
 
-  const loadDiscInfo = useCallback(async (driveIndex: number) => {
+  const loadDiscInfo = useCallback(async (driveIndex: number, forceRefresh = false) => {
     const { setDiscInfo, setLoading, setSelectedDrive, setTmdbResult, updateDiscSession, drives } = useDiscStore.getState()
     setSelectedDrive(driveIndex)
     setLoading(true)
-    console.log(`[useDiscDetection] loadDiscInfo(${driveIndex})`)
+    console.log(`[useDiscDetection] loadDiscInfo(${driveIndex}, forceRefresh=${forceRefresh})`)
 
     // ── Cache-first: try to load cached DiscInfo by volume name ──
     const drive = drives.find(d => d.index === driveIndex)
-    if (drive?.discTitle) {
+    if (!forceRefresh && drive?.discTitle) {
       try {
         const cached = await window.ztr.disc.getInfoCached(drive.discTitle)
         if (cached) {
@@ -160,22 +160,45 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
       }
     }
 
-    // ── No cache hit: full MakeMKV scan ──
-    try {
-      const info = await window.ztr.disc.getInfo(driveIndex)
-      console.log('[useDiscDetection] getInfo result:', info ? `"${info.title}" (${info.discType}) ${info.trackCount} tracks` : 'null')
-      setDiscInfo(info)
+    // ── No cache hit: full MakeMKV scan (with retry for TCOUNT:0) ──
+    const MAX_RETRIES = 3
+    const RETRY_DELAY_MS = 5000
 
-      // Auto-search TMDB after successful disc load
-      if (info?.title) {
-        autoSearchTmdb(info.title)
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const info = await window.ztr.disc.getInfo(driveIndex)
+        console.log(`[useDiscDetection] getInfo result (attempt ${attempt}/${MAX_RETRIES}):`,
+          info ? `"${info.title}" (${info.discType}) ${info.trackCount} tracks` : 'null')
+
+        // If MakeMKV returned 0 tracks but we know a disc is present, retry after delay
+        if (info && info.trackCount === 0 && attempt < MAX_RETRIES) {
+          const currentDrives = useDiscStore.getState().drives
+          const driveHasDisc = currentDrives.some(d => d.index === driveIndex && (d.discTitle || d.discType))
+          if (driveHasDisc) {
+            console.warn(`[useDiscDetection] TCOUNT:0 but disc is present — retrying in ${RETRY_DELAY_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`)
+            await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+            continue
+          }
+        }
+
+        setDiscInfo(info)
+
+        // Auto-search TMDB after successful disc load
+        if (info?.title) {
+          autoSearchTmdb(info.title)
+        }
+        break // Success or no retry needed
+      } catch (err) {
+        console.error(`[useDiscDetection] getInfo failed (attempt ${attempt}/${MAX_RETRIES}):`, err)
+        if (attempt === MAX_RETRIES) {
+          setDiscInfo(null)
+        } else {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+        }
       }
-    } catch (err) {
-      console.error('[useDiscDetection] getInfo failed:', err)
-      setDiscInfo(null)
-    } finally {
-      setLoading(false)
     }
+
+    setLoading(false)
   }, [autoSearchTmdb])
 
   // Auto-load disc info when a drive with disc is first detected
@@ -232,5 +255,13 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
     }
   }, [scan, pollInterval])
 
-  return { scan, loadDiscInfo }
+  const rescanDisc = useCallback(async (forceRefresh = false) => {
+    const { drives, selectedDrive } = useDiscStore.getState()
+    const driveIndex = selectedDrive ?? drives.find(d => d.discTitle || d.discType)?.index ?? 0
+    autoLoadAttempted.current = false
+    console.log(`[useDiscDetection] Manual rescan triggered for drive ${driveIndex} (forceRefresh=${forceRefresh})`)
+    await loadDiscInfo(driveIndex, forceRefresh)
+  }, [loadDiscInfo])
+
+  return { scan, loadDiscInfo, rescanDisc }
 }

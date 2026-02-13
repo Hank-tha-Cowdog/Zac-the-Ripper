@@ -1,7 +1,6 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DiscInfoCard } from './DiscInfoCard'
-import { DiscSetSelector } from './DiscSetSelector'
 import { TrackSelector } from './TrackSelector'
 import { RipModesPanel } from './RipModesPanel'
 import { RipActionBar } from './RipActionBar'
@@ -14,13 +13,13 @@ import { useDiscDetection } from '../../hooks/useDiscDetection'
 
 export function RipPage() {
   const navigate = useNavigate()
-  const { discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession } = useDiscStore()
+  const { discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession, trackCategories, trackNames } = useDiscStore()
   const { addJob } = useJobsStore()
   const [isRipping, setIsRipping] = useState(false)
   const [standbyMessage, setStandbyMessage] = useState<string | null>(null)
 
   // One-shot scan + auto-load disc info if not already loaded from Dashboard
-  useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: true })
+  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: true })
 
   const {
     modes, setModes,
@@ -36,8 +35,17 @@ export function RipPage() {
     kodiIsExtrasDisc, setKodiIsExtrasDisc,
     kodiSetName, setKodiSetName,
     kodiSetOverview, setKodiSetOverview,
-    discSetId, discNumber, setDiscSetId
+    soundVersion, setSoundVersion,
+    customSoundVersion, setCustomSoundVersion,
+    discNumber, setDiscNumber,
+    totalDiscs, setTotalDiscs
   } = useRipSettings()
+
+  const handleEject = async () => {
+    if (selectedDrive === null) return
+    await window.ztr.disc.eject(selectedDrive)
+    navigate('/')
+  }
 
   const handleLibrarySelect = (selection: LibrarySelection) => {
     const { movie, setName, setOverview } = selection
@@ -56,6 +64,27 @@ export function RipPage() {
     const enabledModes = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
     const outputDir = outputPaths.mkv_rip || ''
 
+    // Build track metadata for multi-track extras categorization
+    const isLibraryMode = modes.kodi_export || modes.jellyfin_export || modes.plex_export
+    const longestTrackId = discInfo && discInfo.tracks.length > 0
+      ? discInfo.tracks.reduce((a, b) => a.durationSeconds > b.durationSeconds ? a : b).id
+      : -1
+    const trackMeta = isLibraryMode && selectedTracks.length > 1
+      ? selectedTracks.map((id, idx) => {
+          const cat = trackCategories[id] || (id === longestTrackId ? 'main' : 'featurette')
+          const track = discInfo?.tracks.find(t => t.id === id)
+          const isGeneric = !track?.title || /^Title\s+\d+$/i.test(track.title)
+          const extrasIndex = selectedTracks.filter(tid => {
+            const tidCat = trackCategories[tid] || (tid === longestTrackId ? 'main' : 'featurette')
+            return tidCat !== 'main'
+          }).indexOf(id)
+          const name = trackNames[id] || (isGeneric
+            ? `${kodiTitle || 'Bonus'} - Bonus ${String(extrasIndex + 1).padStart(3, '0')}`
+            : track?.title || `Bonus ${String(idx + 1).padStart(3, '0')}`)
+          return { titleId: id, category: cat, name }
+        })
+      : undefined
+
     try {
       const result = await window.ztr.rip.start({
         discIndex: selectedDrive,
@@ -64,7 +93,8 @@ export function RipPage() {
         modes: enabledModes,
         preserveInterlaced,
         convertSubsToSrt,
-        kodiOptions: modes.kodi_export ? {
+        trackMeta,
+        kodiOptions: (modes.kodi_export || modes.jellyfin_export || modes.plex_export) ? {
           mediaType: kodiMediaType,
           title: kodiTitle,
           year: kodiYear,
@@ -72,10 +102,11 @@ export function RipPage() {
           edition: kodiEdition === 'Custom' ? kodiCustomEdition : kodiEdition || undefined,
           isExtrasDisc: kodiIsExtrasDisc || undefined,
           setName: kodiSetName || undefined,
-          setOverview: kodiSetOverview || undefined
-        } : undefined,
-        discSetId: discSetId || undefined,
-        discNumber: discNumber || undefined
+          setOverview: kodiSetOverview || undefined,
+          soundVersion: soundVersion === 'Custom' ? customSoundVersion : soundVersion || undefined,
+          discNumber: parseInt(discNumber) || undefined,
+          totalDiscs: parseInt(totalDiscs) || undefined
+        } : undefined
       })
 
       if (result?.jobId) {
@@ -85,7 +116,14 @@ export function RipPage() {
           type: enabledModes[0] || 'mkv_rip',
           status: 'running',
           percentage: 0,
-          message: 'Disc drive spinning up...'
+          message: 'Disc drive spinning up...',
+          movieTitle: kodiTitle || undefined,
+          movieYear: kodiYear || undefined,
+          collectionName: kodiSetName || undefined,
+          edition: kodiEdition === 'Custom' ? kodiCustomEdition : kodiEdition || undefined,
+          soundVersion: soundVersion === 'Custom' ? customSoundVersion : soundVersion || undefined,
+          discNumber: parseInt(discNumber) || undefined,
+          totalDiscs: parseInt(totalDiscs) || undefined
         })
         setTimeout(() => navigate('/progress'), 1500)
       }
@@ -102,27 +140,23 @@ export function RipPage() {
 
       <div className="grid grid-cols-3 gap-4">
         <div className="col-span-2 space-y-4">
-          <DiscInfoCard />
-          <TrackSelector />
+          <DiscInfoCard onRescan={rescanDisc} />
+          <TrackSelector
+            isLibraryMode={modes.kodi_export || modes.jellyfin_export || modes.plex_export}
+            movieTitle={kodiTitle}
+          />
         </div>
 
         <div className="space-y-4">
-          <DiscSetSelector
-            selectedSetId={discSetId}
-            discNumber={discNumber}
-            onSelectSet={(id, num) => setDiscSetId(id, num)}
-          />
           <RipModesPanel
             modes={modes}
             onModesChange={setModes}
-            preserveInterlaced={preserveInterlaced}
-            onPreserveInterlacedChange={setPreserveInterlaced}
             convertSubsToSrt={convertSubsToSrt}
             onConvertSubsToSrtChange={setConvertSubsToSrt}
             outputPaths={outputPaths}
             onOutputPathChange={setOutputPath}
           />
-          {modes.kodi_export && (
+          {(modes.kodi_export || modes.jellyfin_export || modes.plex_export) && (
             <KodiOptionsPanel
               mediaType={kodiMediaType}
               onMediaTypeChange={setKodiMediaType}
@@ -164,6 +198,14 @@ export function RipPage() {
               setName={kodiSetName}
               onSetNameChange={setKodiSetName}
               onLibrarySelect={handleLibrarySelect}
+              soundVersion={soundVersion}
+              onSoundVersionChange={setSoundVersion}
+              customSoundVersion={customSoundVersion}
+              onCustomSoundVersionChange={setCustomSoundVersion}
+              discNumber={discNumber}
+              onDiscNumberChange={setDiscNumber}
+              totalDiscs={totalDiscs}
+              onTotalDiscsChange={setTotalDiscs}
               convertSubsToSrt={convertSubsToSrt}
               onConvertSubsToSrtChange={setConvertSubsToSrt}
             />
@@ -174,6 +216,7 @@ export function RipPage() {
       <RipActionBar
         modes={modes}
         onRip={handleRip}
+        onEject={handleEject}
         isRipping={isRipping}
         standbyMessage={standbyMessage}
       />

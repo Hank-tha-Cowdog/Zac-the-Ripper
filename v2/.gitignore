@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# Vendor binaries (downloaded via scripts/download-ffmpeg.sh)
+vendor/bin/mac/arm64/ffmpeg
+vendor/bin/mac/arm64/ffprobe
+vendor/bin/mac/x64/ffmpeg
+vendor/bin/mac/x64/ffprobe

@@ -7,6 +7,9 @@ export const IPC = {
   DISC_INFO: 'disc:info',
   DISC_INFO_CACHED: 'disc:info-cached',
   DISC_TMDB_CACHE_SET: 'disc:tmdb-cache-set',
+  DISC_EJECT: 'disc:eject',
+  DISC_STREAM_START: 'disc:stream-start',
+  DISC_STREAM_STOP: 'disc:stream-stop',
 
   // Rip operations
   RIP_START: 'rip:start',
@@ -65,6 +68,9 @@ export const IPC = {
   // App
   APP_GET_VERSION: 'app:get-version',
   APP_GET_PLATFORM: 'app:get-platform',
+
+  // Notifications
+  NOTIFY_TEST: 'notify:test',
 
   // Log forwarding (main → renderer)
   LOG_ENTRY: 'log:entry'

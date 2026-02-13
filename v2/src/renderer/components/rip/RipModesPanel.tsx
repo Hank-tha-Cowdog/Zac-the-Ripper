@@ -2,13 +2,10 @@ import React from 'react'
 import { FolderOpen } from 'lucide-react'
 import { Card, Toggle, Button, TechLabel, Input, Tooltip } from '../ui'
 import { useAppStore } from '../../stores/app-store'
-import { useDiscStore } from '../../stores/disc-store'
 
 interface RipModesPanelProps {
   modes: Record<string, boolean>
   onModesChange: (modes: Record<string, boolean>) => void
-  preserveInterlaced: boolean
-  onPreserveInterlacedChange: (v: boolean) => void
   convertSubsToSrt: boolean
   onConvertSubsToSrtChange: (v: boolean) => void
   outputPaths: Record<string, string>
@@ -20,23 +17,21 @@ const modeTooltips: Record<string, string> = {
   raw_capture: 'Full disc backup preserving VIDEO_TS (DVD) or BDMV (Blu-ray) structure, including menus, extras, and all disc metadata. Largest output size.',
   ffv1_archival: 'Re-encode to FFV1 v3 lossless codec with FLAC audio in MKV. Mathematically identical to source — every frame is a keyframe with CRC. Ideal for long-term preservation.',
   streaming_encode: 'Re-encode for streaming using your configured codec (HEVC or H.264). Optimized for Kodi, Plex, and Jellyfin. ~50% smaller than lossless. Surround audio is passed through.',
-  kodi_export: 'Full pipeline: extracts from disc, encodes to HEVC/H.264, then organizes into Kodi folder structure with NFO, poster, and fanart. No need to enable MKV Rip separately.'
+  kodi_export: 'Full pipeline: extracts from disc, encodes to HEVC/H.264, then organizes into Kodi folder structure with NFO, poster, and fanart. No need to enable MKV Rip separately.',
+  jellyfin_export: 'Full pipeline: extracts from disc, encodes to HEVC/H.264, then organizes into Jellyfin folder structure with NFO, poster, and fanart. Identical format to Kodi — compatible with both.',
+  plex_export: 'Full pipeline: extracts from disc, encodes to HEVC/H.264, then organizes into Plex folder structure with NFO, poster, and fanart. Identical format to Kodi/Jellyfin — compatible with all three.'
 }
 
 export function RipModesPanel({
   modes,
   onModesChange,
-  preserveInterlaced,
-  onPreserveInterlacedChange,
   convertSubsToSrt,
   onConvertSubsToSrtChange,
   outputPaths,
   onOutputPathChange
 }: RipModesPanelProps) {
   const settings = useAppStore((s) => s.settings)
-  const discInfo = useDiscStore((s) => s.discInfo)
-  const hasInterlaced = discInfo?.tracks.some((t) => t.isInterlaced) || false
-  const kodiIsOn = modes.kodi_export || false
+  const mediaLibIsOn = modes.kodi_export || modes.jellyfin_export || modes.plex_export || false
 
   const modeConfigs = [
     {
@@ -62,6 +57,18 @@ export function RipModesPanel({
       label: 'Streaming Encode',
       description: 'HEVC/H.264 re-encode — Kodi/Plex ready',
       pathKey: 'paths.streaming_output'
+    },
+    {
+      key: 'jellyfin_export',
+      label: 'Capture for Jellyfin',
+      description: 'Rip \u2192 encode \u2192 organize with Jellyfin-ready NFO, artwork, and folders',
+      pathKey: 'jellyfin.library_path'
+    },
+    {
+      key: 'plex_export',
+      label: 'Capture for Plex',
+      description: 'Rip \u2192 encode \u2192 organize with Plex-ready NFO, artwork, and folders',
+      pathKey: 'plex.library_path'
     },
     {
       key: 'kodi_export',
@@ -97,8 +104,8 @@ export function RipModesPanel({
               <Tooltip content={modeTooltips[config.key]} inline position="right" />
             </div>
 
-            {/* Pipeline explanation for Kodi */}
-            {config.key === 'kodi_export' && modes.kodi_export && (
+            {/* Pipeline explanation for media library modes */}
+            {(config.key === 'jellyfin_export' || config.key === 'plex_export' || config.key === 'kodi_export') && modes[config.key] && (
               <p className="ml-12 mt-1 text-[10px] text-zinc-500 font-mono">
                 Pipeline: Extract (MKV) &rarr; Encode &rarr; Organize (folders + NFO + artwork)
               </p>
@@ -121,27 +128,8 @@ export function RipModesPanel({
         ))}
       </div>
 
-      {/* Interlace toggle */}
-      {hasInterlaced && (
-        <div className="mt-4 pt-4 border-t border-zinc-800">
-          <div className="flex items-center gap-1">
-            <Toggle
-              checked={preserveInterlaced}
-              onChange={onPreserveInterlacedChange}
-              label="Preserve Interlaced Fields"
-              description="Skip deinterlacing — encode with interlaced flags for later QTGMC processing"
-            />
-            <Tooltip
-              content="When OFF (default): interlaced content is deinterlaced with yadif for clean progressive playback. When ON: fields are preserved and encoded with interlaced flags (-flags +ilme+ildct), letting you run superior QTGMC deinterlacing via VapourSynth later."
-              inline
-              position="right"
-            />
-          </div>
-        </div>
-      )}
-
       {/* SRT conversion toggle */}
-      {!kodiIsOn && (
+      {!mediaLibIsOn && (
         <div className="mt-3 pt-3 border-t border-zinc-800">
           <div className="flex items-center gap-1">
             <Toggle

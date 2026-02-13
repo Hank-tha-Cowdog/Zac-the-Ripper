@@ -41,13 +41,13 @@ function getFFV1Args(context: EncodingContext): string[] {
     '-c:a', 'flac',
     // Subtitles: copy all
     '-c:s', 'copy',
-    // Map all streams
-    '-map', '0'
+    // Map all streams + preserve all metadata and chapters
+    '-map', '0', '-map_metadata', '0', '-map_chapters', '0'
   ]
 }
 
 function getH264Args(context: EncodingContext): string[] {
-  const { mediaInfo, preserveInterlaced } = context
+  const { mediaInfo } = context
   const video = mediaInfo.videoStreams[0]
 
   const crf = getSetting('encoding.h264_crf') || '18'
@@ -58,11 +58,6 @@ function getH264Args(context: EncodingContext): string[] {
 
   const args: string[] = []
   const vfFilters: string[] = []
-
-  // Handle interlacing (before scaling so yadif runs on source resolution)
-  if (video?.isInterlaced && !preserveInterlaced) {
-    vfFilters.push('yadif=0:-1:0')
-  }
 
   // SD color space conversion: rec601 → rec709 for modern playback compatibility
   const isSD = video && video.width <= 720
@@ -89,8 +84,8 @@ function getH264Args(context: EncodingContext): string[] {
     }
   }
 
-  // Interlaced passthrough flags (when preserving fields)
-  if (video?.isInterlaced && preserveInterlaced) {
+  // Preserve interlaced flags if source is interlaced (no deinterlacing)
+  if (video?.isInterlaced) {
     args.push('-flags', '+ilme+ildct', '-top', '1')
   }
 
@@ -156,14 +151,14 @@ function getH264Args(context: EncodingContext): string[] {
   // Subtitles: copy as soft subs (not burned in)
   args.push('-c:s', 'copy')
 
-  // Map all streams
-  args.push('-map', '0')
+  // Map all streams + preserve all metadata and chapters
+  args.push('-map', '0', '-map_metadata', '0', '-map_chapters', '0')
 
   return args
 }
 
 function getHEVCArgs(context: EncodingContext): string[] {
-  const { mediaInfo, preserveInterlaced } = context
+  const { mediaInfo } = context
   const video = mediaInfo.videoStreams[0]
 
   const quality = getSetting('encoding.hevc_quality') || '65'
@@ -176,11 +171,6 @@ function getHEVCArgs(context: EncodingContext): string[] {
   // Determine if 10-bit / HDR content
   const is10bit = video && (video.bitDepth > 8 || video.isHDR)
   const profileName = is10bit ? 'main10' : 'main'
-
-  // Handle interlacing (before scaling so yadif runs on source resolution)
-  if (video?.isInterlaced && !preserveInterlaced) {
-    vfFilters.push('yadif=0:-1:0')
-  }
 
   // SD color space conversion: rec601 → rec709 for modern playback compatibility
   const isSD = video && video.width <= 720
@@ -206,8 +196,8 @@ function getHEVCArgs(context: EncodingContext): string[] {
     }
   }
 
-  // Interlaced passthrough flags
-  if (video?.isInterlaced && preserveInterlaced) {
+  // Preserve interlaced flags if source is interlaced (no deinterlacing)
+  if (video?.isInterlaced) {
     args.push('-flags', '+ilme+ildct', '-top', '1')
   }
 
@@ -275,8 +265,8 @@ function getHEVCArgs(context: EncodingContext): string[] {
   // Subtitles: copy as soft subs (not burned in)
   args.push('-c:s', 'copy')
 
-  // Map all streams
-  args.push('-map', '0')
+  // Map all streams + preserve all metadata and chapters
+  args.push('-map', '0', '-map_metadata', '0', '-map_chapters', '0')
 
   return args
 }

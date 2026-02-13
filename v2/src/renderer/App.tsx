@@ -6,6 +6,7 @@ import { RipPage } from './components/rip/RipPage'
 import { ProgressPage } from './components/progress/ProgressPage'
 import { HistoryPage } from './components/history/HistoryPage'
 import { SettingsPage } from './components/settings/SettingsPage'
+import { PreviewPage } from './components/preview/PreviewPage'
 import { MakeMKVSetupScreen } from './components/setup/MakeMKVSetupScreen'
 import { useAppStore } from './stores/app-store'
 import { useJobProgress } from './hooks/useJobProgress'
@@ -67,6 +68,7 @@ function App() {
       <AppShell>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/preview" element={<PreviewPage />} />
           <Route path="/rip" element={<RipPage />} />
           <Route path="/progress" element={<ProgressPage />} />
           <Route path="/history" element={<HistoryPage />} />

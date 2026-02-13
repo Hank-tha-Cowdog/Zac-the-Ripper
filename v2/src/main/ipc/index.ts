@@ -8,6 +8,7 @@ import { registerTmdbHandlers } from './tmdb-handlers'
 import { registerToolsHandlers } from './tools-handlers'
 import { registerAppHandlers } from './app-handlers'
 import { registerLibraryHandlers } from './library-handlers'
+import { registerNotifyHandlers } from './notify-handlers'
 
 export function registerAllIpcHandlers(): void {
   registerDiscHandlers()
@@ -20,4 +21,5 @@ export function registerAllIpcHandlers(): void {
   registerToolsHandlers()
   registerAppHandlers()
   registerLibraryHandlers()
+  registerNotifyHandlers()
 }

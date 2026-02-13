@@ -1,5 +1,5 @@
 import React from 'react'
-import { X, Clock } from 'lucide-react'
+import { X, Clock, Layers } from 'lucide-react'
 import { Card, Badge, ProgressBar, Button } from '../ui'
 
 interface JobCardProps {
@@ -12,6 +12,13 @@ interface JobCardProps {
     speed?: number
     eta?: string
     error?: string
+    movieTitle?: string
+    movieYear?: string
+    collectionName?: string
+    edition?: string
+    soundVersion?: string
+    discNumber?: number
+    totalDiscs?: number
   }
   onCancel: (jobId: string) => void
 }
@@ -52,6 +59,25 @@ export function JobCard({ job, onCancel }: JobCardProps) {
           )}
         </div>
       </div>
+
+      {/* Movie metadata row */}
+      {(job.movieTitle || job.collectionName) && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-2">
+          {job.movieTitle && (
+            <span className="text-sm font-medium text-zinc-200">
+              {job.movieTitle}{job.movieYear ? ` (${job.movieYear})` : ''}
+            </span>
+          )}
+          {job.collectionName && (
+            <Badge variant="info"><Layers className="w-2.5 h-2.5 mr-1" />{job.collectionName}</Badge>
+          )}
+          {job.edition && <Badge variant="default">{job.edition}</Badge>}
+          {job.soundVersion && <Badge variant="default">{job.soundVersion}</Badge>}
+          {job.discNumber && (
+            <Badge variant="default">Disc {job.discNumber}{job.totalDiscs ? `/${job.totalDiscs}` : ''}</Badge>
+          )}
+        </div>
+      )}
 
       <ProgressBar
         value={job.percentage}

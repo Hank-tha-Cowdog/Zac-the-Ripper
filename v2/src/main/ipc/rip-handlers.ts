@@ -14,6 +14,7 @@ export function registerRipHandlers(): void {
     modes: string[]
     preserveInterlaced: boolean
     convertSubsToSrt: boolean
+    trackMeta?: Array<{ titleId: number; category: string; name: string }>
     kodiOptions?: unknown
     discSetId?: number
     discNumber?: number

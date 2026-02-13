@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Search, Film, Tv, Package, FolderOpen, Layers } from 'lucide-react'
 import { Card, Input, Select, Button, Modal, TechLabel, Badge, Tooltip, LabelWithTooltip, Toggle } from '../ui'
-import { MOVIE_VERSIONS } from '../../../shared/constants'
+import { MOVIE_VERSIONS, SOUND_VERSIONS } from '../../../shared/constants'
 import { LibraryBrowser, LibrarySelection } from './LibraryBrowser'
 
 interface TMDBResult {
@@ -32,6 +32,14 @@ interface KodiOptionsPanelProps {
   setName: string
   onSetNameChange: (name: string) => void
   onLibrarySelect: (selection: LibrarySelection) => void
+  soundVersion: string
+  onSoundVersionChange: (v: string) => void
+  customSoundVersion: string
+  onCustomSoundVersionChange: (v: string) => void
+  discNumber: string
+  onDiscNumberChange: (v: string) => void
+  totalDiscs: string
+  onTotalDiscsChange: (v: string) => void
   convertSubsToSrt?: boolean
   onConvertSubsToSrtChange?: (v: boolean) => void
 }
@@ -54,6 +62,14 @@ export function KodiOptionsPanel({
   setName,
   onSetNameChange,
   onLibrarySelect,
+  soundVersion,
+  onSoundVersionChange,
+  customSoundVersion,
+  onCustomSoundVersionChange,
+  discNumber,
+  onDiscNumberChange,
+  totalDiscs,
+  onTotalDiscsChange,
   convertSubsToSrt,
   onConvertSubsToSrtChange
 }: KodiOptionsPanelProps) {
@@ -96,7 +112,7 @@ export function KodiOptionsPanel({
 
   return (
     <Card className="ml-12 mt-2">
-      <TechLabel className="mb-3 block">Kodi Options</TechLabel>
+      <TechLabel className="mb-3 block">Media Options</TechLabel>
 
       <div className="space-y-3">
         <div className="flex flex-col gap-1">
@@ -235,6 +251,54 @@ export function KodiOptionsPanel({
                 onChange={(e) => onCustomEditionChange(e.target.value)}
               />
             )}
+          </div>
+        )}
+
+        {/* Sound Version */}
+        {mediaType === 'movie' && (
+          <div className="flex flex-col gap-1">
+            <LabelWithTooltip
+              label="Sound Version"
+              tooltip="Audio format on this disc. Appended to the filename so Kodi/Jellyfin can display it alongside the movie version. Separate from Movie Version (Theatrical, Director's Cut, etc.)."
+              className="label-tech"
+            />
+            <select className="select w-full pr-8" value={soundVersion} onChange={(e) => onSoundVersionChange(e.target.value)}>
+              <option value="">None</option>
+              {SOUND_VERSIONS.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+            {soundVersion === 'Custom' && (
+              <input className="input w-full mt-1" placeholder="Custom audio format..." value={customSoundVersion} onChange={(e) => onCustomSoundVersionChange(e.target.value)} />
+            )}
+          </div>
+        )}
+
+        {/* Disc Number (multi-disc sets) */}
+        {mediaType === 'movie' && (
+          <div className="flex flex-col gap-1">
+            <LabelWithTooltip
+              label="Disc Number"
+              tooltip="For multi-disc movies (e.g., a 2-disc extended edition). Appends '-disc2' to the filename. Leave blank for single-disc movies. Plex and Jellyfin use this to group discs under one movie entry."
+              className="label-tech"
+            />
+            <div className="flex items-center gap-2">
+              <input
+                className="input w-16 text-center"
+                type="number" min="1"
+                value={discNumber}
+                onChange={(e) => onDiscNumberChange(e.target.value)}
+                placeholder="—"
+              />
+              <span className="text-xs text-zinc-500">of</span>
+              <input
+                className="input w-16 text-center"
+                type="number" min="1"
+                value={totalDiscs}
+                onChange={(e) => onTotalDiscsChange(e.target.value)}
+                placeholder="—"
+              />
+            </div>
           </div>
         )}
 

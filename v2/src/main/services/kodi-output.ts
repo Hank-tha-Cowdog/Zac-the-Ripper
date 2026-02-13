@@ -111,6 +111,19 @@ export interface KodiShowNFOParams {
   seasonArtwork?: Record<number, { poster?: string; fanart?: string; banner?: string }>
 }
 
+// ─── Extras folder mapping (Plex + Jellyfin + Kodi compatible) ─────────
+
+export const EXTRAS_FOLDER_MAP: Record<string, string> = {
+  behindthescenes: 'Behind The Scenes',
+  deleted: 'Deleted Scenes',
+  featurette: 'Featurettes',
+  interview: 'Interviews',
+  scene: 'Scenes',
+  short: 'Shorts',
+  trailer: 'Trailers',
+  other: 'Other'
+}
+
 // ─── Service ───────────────────────────────────────────────────────────
 
 export class KodiOutputService {
@@ -121,9 +134,9 @@ export class KodiOutputService {
    */
   buildMoviePath(params: {
     libraryPath: string; title: string; year: number
-    edition?: string; isExtrasDisc?: boolean
+    edition?: string; soundVersion?: string; discNumber?: number; totalDiscs?: number; isExtrasDisc?: boolean
   }): { outputDir: string; videoPath: string } {
-    const { libraryPath, title, year, edition, isExtrasDisc } = params
+    const { libraryPath, title, year, edition, soundVersion, discNumber, totalDiscs, isExtrasDisc } = params
     const folderName = `${title} (${year})`
     const outputDir = join(libraryPath, 'Movies', folderName)
 
@@ -134,7 +147,9 @@ export class KodiOutputService {
     }
 
     let fileName = folderName
-    if (edition) fileName += ` - ${edition}`
+    if (edition) fileName += ` {edition-${edition}}`
+    if (soundVersion) fileName += ` - ${soundVersion}`
+    if (discNumber && totalDiscs && totalDiscs > 1) fileName += ` - disc${discNumber}`
     return { outputDir, videoPath: join(outputDir, `${fileName}.mkv`) }
   }
 
@@ -142,8 +157,10 @@ export class KodiOutputService {
    * Write NFO, copy artwork, and create Extras/ folder.
    * Called AFTER the video file has been written to videoPath by FFmpeg.
    */
-  finalizeMovie(params: KodiMovieParams & { videoAlreadyAtPath: string }): { nfoPath: string } {
-    const { libraryPath, title, year, artwork, edition, isExtrasDisc, videoAlreadyAtPath } = params
+  finalizeMovie(params: KodiMovieParams & { videoAlreadyAtPath: string; soundVersion?: string; totalDiscs?: number }): { nfoPath: string } {
+    const { libraryPath, title, year, artwork, edition, isExtrasDisc, videoAlreadyAtPath, discNumber } = params
+    const soundVersion = (params as { soundVersion?: string }).soundVersion
+    const totalDiscs = (params as { totalDiscs?: number }).totalDiscs
     const folderName = `${title} (${year})`
     const outputDir = join(libraryPath, 'Movies', folderName)
 
@@ -158,7 +175,9 @@ export class KodiOutputService {
 
     // Generate NFO (named to match video file)
     let nfoBaseName = folderName
-    if (edition) nfoBaseName += ` - ${edition}`
+    if (edition) nfoBaseName += ` {edition-${edition}}`
+    if (soundVersion) nfoBaseName += ` - ${soundVersion}`
+    if (discNumber && totalDiscs && totalDiscs > 1) nfoBaseName += ` - disc${discNumber}`
     const nfoPath = join(outputDir, `${nfoBaseName}.nfo`)
     writeFileSync(nfoPath, this.generateMovieNFO(params), 'utf-8')
 
@@ -181,8 +200,10 @@ export class KodiOutputService {
     return { nfoPath }
   }
 
-  exportMovie(params: KodiMovieParams): { outputDir: string; nfoPath: string; moviePath: string } {
-    const { libraryPath, title, year, sourceFile, artwork, edition, isExtrasDisc } = params
+  exportMovie(params: KodiMovieParams & { soundVersion?: string; totalDiscs?: number }): { outputDir: string; nfoPath: string; moviePath: string } {
+    const { libraryPath, title, year, sourceFile, artwork, edition, isExtrasDisc, discNumber } = params
+    const soundVersion = (params as { soundVersion?: string }).soundVersion
+    const totalDiscs = (params as { totalDiscs?: number }).totalDiscs
 
     // Folder is always "Movies/Title (Year)/" — no edition in folder name
     // This groups all versions under one Kodi library entry
@@ -203,9 +224,11 @@ export class KodiOutputService {
       return { outputDir: extrasDir, nfoPath: '', moviePath }
     }
 
-    // Build filename: "Title (Year) - Director's Cut.mkv" (edition in filename only)
+    // Build filename: "Title (Year) {edition-Director's Cut} - DTS-HD Master Audio - disc2.mkv"
     let fileName = folderName
-    if (edition) fileName += ` - ${edition}`
+    if (edition) fileName += ` {edition-${edition}}`
+    if (soundVersion) fileName += ` - ${soundVersion}`
+    if (discNumber && totalDiscs && totalDiscs > 1) fileName += ` - disc${discNumber}`
 
     const moviePath = join(outputDir, `${fileName}${ext}`)
     copyFileSync(sourceFile, moviePath)

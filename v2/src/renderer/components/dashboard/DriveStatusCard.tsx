@@ -1,5 +1,5 @@
 import React from 'react'
-import { Disc3, ScanLine, Film, Music, Clock } from 'lucide-react'
+import { Disc3, ScanLine, Film, Music, Clock, ArrowUpFromLine } from 'lucide-react'
 import { Card, Badge, StatusDot, Button, Tooltip } from '../ui'
 
 interface DriveStatusCardProps {
@@ -12,6 +12,7 @@ interface DriveStatusCardProps {
   }
   onScan: (index: number) => void
   onRip: (index: number) => void
+  onEject: (index: number) => void
   tmdbPosterPath?: string | null
   tmdbTitle?: string | null
   tmdbYear?: string | null
@@ -32,7 +33,7 @@ function getVideoStdLabel(framerate: string): string {
   return ''
 }
 
-export function DriveStatusCard({ drive, onScan, onRip, tmdbPosterPath, tmdbTitle, tmdbYear, scannedTitle, discInfo }: DriveStatusCardProps) {
+export function DriveStatusCard({ drive, onScan, onRip, onEject, tmdbPosterPath, tmdbTitle, tmdbYear, scannedTitle, discInfo }: DriveStatusCardProps) {
   const hasDisc = !!(drive.discTitle || drive.discType)
   const displayTitle = drive.discTitle || scannedTitle
   const videoStd = discInfo?.framerate ? getVideoStdLabel(discInfo.framerate) : ''
@@ -109,6 +110,11 @@ export function DriveStatusCard({ drive, onScan, onRip, tmdbPosterPath, tmdbTitl
         <Tooltip content="Scan the disc to enumerate all titles, audio tracks, and subtitles. Requires MakeMKV for full track listing.">
           <Button variant="ghost" size="sm" onClick={() => onScan(drive.index)}>
             <ScanLine className="w-4 h-4" />
+          </Button>
+        </Tooltip>
+        <Tooltip content="Eject the disc from this drive.">
+          <Button variant="ghost" size="sm" onClick={() => onEject(drive.index)}>
+            <ArrowUpFromLine className="w-4 h-4" />
           </Button>
         </Tooltip>
         {hasDisc && (

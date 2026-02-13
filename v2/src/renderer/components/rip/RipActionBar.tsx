@@ -1,16 +1,17 @@
 import React from 'react'
-import { Disc3 } from 'lucide-react'
-import { Button, Badge } from '../ui'
+import { Disc3, ArrowUpFromLine } from 'lucide-react'
+import { Button, Badge, Tooltip } from '../ui'
 import { useDiscStore } from '../../stores/disc-store'
 
 interface RipActionBarProps {
   modes: Record<string, boolean>
   onRip: () => void
+  onEject: () => void
   isRipping: boolean
   standbyMessage?: string | null
 }
 
-export function RipActionBar({ modes, onRip, isRipping, standbyMessage }: RipActionBarProps) {
+export function RipActionBar({ modes, onRip, onEject, isRipping, standbyMessage }: RipActionBarProps) {
   const { selectedTracks, discInfo } = useDiscStore()
 
   const enabledModes = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
@@ -58,18 +59,30 @@ export function RipActionBar({ modes, onRip, isRipping, standbyMessage }: RipAct
           </div>
         </div>
 
-        <Button
-          variant="primary"
-          size="lg"
-          disabled={!canRip}
-          onClick={onRip}
-          icon={<Disc3 className={`w-5 h-5${isRipping ? ' animate-spin' : ''}`} />}
-          className={`px-8${isRipping ? ' animate-rip-button' : ''}`}
-        >
-          <span className={isRipping ? 'animate-rip-text' : ''}>
-            {isRipping ? 'Ripping...' : 'RIP!'}
-          </span>
-        </Button>
+        <div className="flex items-center gap-2">
+          <Tooltip content="Eject the disc from the drive.">
+            <Button
+              variant="secondary"
+              size="lg"
+              onClick={onEject}
+              disabled={isRipping}
+            >
+              <ArrowUpFromLine className="w-5 h-5" />
+            </Button>
+          </Tooltip>
+          <Button
+            variant="primary"
+            size="lg"
+            disabled={!canRip}
+            onClick={onRip}
+            icon={<Disc3 className={`w-5 h-5${isRipping ? ' animate-spin' : ''}`} />}
+            className={`px-8${isRipping ? ' animate-rip-button' : ''}`}
+          >
+            <span className={isRipping ? 'animate-rip-text' : ''}>
+              {isRipping ? 'Ripping...' : 'RIP!'}
+            </span>
+          </Button>
+        </div>
       </div>
 
       {standbyMessage && (

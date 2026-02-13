@@ -2,6 +2,8 @@ import { BrowserWindow } from 'electron'
 import { readdirSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { spawn, type ChildProcess } from 'child_process'
+import http from 'http'
 import { runProcess, RunningProcess } from '../util/process-runner'
 import { getSetting } from '../database/queries/settings'
 import { findToolPath, getBundledBinPath } from '../util/platform'
@@ -269,6 +271,103 @@ export class MakeMKVService {
       })
 
       this.activeProcesses.set(jobId, proc)
+    })
+  }
+
+  // ─── Streaming ──────────────────────────────────────────────────────
+
+  private streamProcess: ChildProcess | null = null
+
+  async startStream(discIndex: number): Promise<{ port: number }> {
+    // Stop any existing stream first, then wait for it to fully release the drive
+    if (this.streamProcess) {
+      this.stopStream()
+      await new Promise(r => setTimeout(r, 2000))
+    }
+
+    const makemkvcon = this.getMakeMKVPath()
+    const port = 51000
+
+    log.info(`[stream] Starting MakeMKV stream server: disc:${discIndex} on port ${port}`)
+    const proc = spawn(makemkvcon, ['stream', `disc:${discIndex}`], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    this.streamProcess = proc
+
+    // Track whether process exited early (before server became ready)
+    let earlyExit = false
+    let earlyExitCode: number | null = null
+    let stderrOutput = ''
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      log.debug(`[stream] stdout: ${data.toString().trim()}`)
+    })
+    proc.stderr?.on('data', (data: Buffer) => {
+      const msg = data.toString().trim()
+      stderrOutput += msg + '\n'
+      log.info(`[stream] stderr: ${msg}`)
+    })
+    proc.on('exit', (code) => {
+      log.info(`[stream] MakeMKV stream server exited with code ${code}`)
+      earlyExit = true
+      earlyExitCode = code
+      if (this.streamProcess === proc) {
+        this.streamProcess = null
+      }
+    })
+
+    // Wait for stream server to be ready (up to 90s for slow DVD spinup)
+    await this.waitForStreamReady(port, 90000, () => earlyExit, () => earlyExitCode, () => stderrOutput)
+    return { port }
+  }
+
+  stopStream(): void {
+    if (this.streamProcess) {
+      log.info('[stream] Stopping MakeMKV stream server')
+      this.streamProcess.kill()
+      this.streamProcess = null
+    }
+  }
+
+  private waitForStreamReady(
+    port: number,
+    maxWaitMs: number,
+    hasExited: () => boolean,
+    exitCode: () => number | null,
+    stderrOutput: () => string
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const start = Date.now()
+      const poll = () => {
+        // If the process already died, stop waiting
+        if (hasExited()) {
+          const code = exitCode()
+          const stderr = stderrOutput().trim()
+          const detail = stderr ? `: ${stderr.slice(0, 200)}` : ''
+          reject(new Error(`MakeMKV stream process exited with code ${code} before server became ready${detail}`))
+          return
+        }
+
+        if (Date.now() - start > maxWaitMs) {
+          this.stopStream()
+          reject(new Error(`Stream server did not start within ${maxWaitMs / 1000}s`))
+          return
+        }
+
+        const req = http.get(`http://localhost:${port}/`, (res) => {
+          res.resume()
+          if (res.statusCode && res.statusCode < 500) {
+            log.info(`[stream] Stream server ready on port ${port} (took ${((Date.now() - start) / 1000).toFixed(1)}s)`)
+            resolve()
+          } else {
+            setTimeout(poll, 1000)
+          }
+        })
+        req.on('error', () => setTimeout(poll, 1000))
+        req.setTimeout(3000, () => { req.destroy(); setTimeout(poll, 1000) })
+      }
+      // Give the process a moment to spawn before first poll
+      setTimeout(poll, 1000)
     })
   }
 

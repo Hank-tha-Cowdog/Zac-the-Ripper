@@ -39,6 +39,7 @@ interface DiscInfo {
   title: string
   discType: string
   discId: string
+  fingerprint: string
   trackCount: number
   tracks: TrackInfo[]
   metadata: Record<string, string>
@@ -61,8 +62,6 @@ export interface DiscSessionState {
   kodiTmdbId: number | null
   kodiSetName: string
   kodiSetOverview: string
-  discSetId: number | null
-  discNumber: number | null
 }
 
 const DEFAULT_DISC_SESSION: DiscSessionState = {
@@ -71,9 +70,7 @@ const DEFAULT_DISC_SESSION: DiscSessionState = {
   kodiYear: '',
   kodiTmdbId: null,
   kodiSetName: '',
-  kodiSetOverview: '',
-  discSetId: null,
-  discNumber: null
+  kodiSetOverview: ''
 }
 
 interface DiscState {
@@ -81,6 +78,8 @@ interface DiscState {
   selectedDrive: number | null
   discInfo: DiscInfo | null
   selectedTracks: number[]
+  trackCategories: Record<number, string>
+  trackNames: Record<number, string>
   scanning: boolean
   loading: boolean
   tmdbResult: TMDBResult | null
@@ -93,6 +92,8 @@ interface DiscState {
   toggleTrack: (trackId: number) => void
   selectAllTracks: () => void
   selectMainFeature: () => void
+  setTrackCategory: (trackId: number, category: string) => void
+  setTrackName: (trackId: number, name: string) => void
   setScanning: (v: boolean) => void
   setLoading: (v: boolean) => void
   setTmdbResult: (result: TMDBResult | null) => void
@@ -105,6 +106,8 @@ export const useDiscStore = create<DiscState>((set, get) => ({
   selectedDrive: null,
   discInfo: null,
   selectedTracks: [],
+  trackCategories: {},
+  trackNames: {},
   scanning: false,
   loading: false,
   tmdbResult: null,
@@ -120,8 +123,8 @@ export const useDiscStore = create<DiscState>((set, get) => ({
   },
   setDiscInfo: (info) => {
     const prev = get().discInfo
-    const discChanged = !prev || prev.discId !== info?.discId
-    console.log(`[disc-store] setDiscInfo: title="${info?.title}" type=${info?.discType} tracks=${info?.trackCount} discChanged=${discChanged}`)
+    const discChanged = !prev || prev.fingerprint !== info?.fingerprint
+    console.log(`[disc-store] setDiscInfo: title="${info?.title}" type=${info?.discType} tracks=${info?.trackCount} fingerprint="${info?.fingerprint}" discChanged=${discChanged}`)
 
     set({ discInfo: info })
 
@@ -153,6 +156,8 @@ export const useDiscStore = create<DiscState>((set, get) => ({
         console.log(`[disc-store] Disc changed — resetting session, kodiTitle="${cleaned}"`)
         set({
           tmdbResult: null,
+          trackCategories: {},
+          trackNames: {},
           discSession: {
             ...DEFAULT_DISC_SESSION,
             kodiTitle: cleaned
@@ -186,6 +191,10 @@ export const useDiscStore = create<DiscState>((set, get) => ({
       set({ selectedTracks: [longest.id] })
     }
   },
+  setTrackCategory: (trackId, category) =>
+    set((state) => ({ trackCategories: { ...state.trackCategories, [trackId]: category } })),
+  setTrackName: (trackId, name) =>
+    set((state) => ({ trackNames: { ...state.trackNames, [trackId]: name } })),
   setScanning: (scanning) => set({ scanning }),
   setLoading: (loading) => set({ loading }),
   setTmdbResult: (tmdbResult) => set({ tmdbResult }),

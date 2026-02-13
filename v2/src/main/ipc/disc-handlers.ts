@@ -1,9 +1,15 @@
 import { ipcMain } from 'electron'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { IPC } from '../../shared/ipc-channels'
 import { DiscDetectionService } from '../services/disc-detection'
+import { MakeMKVService } from '../services/makemkv'
 import * as discQueries from '../database/queries/discs'
 
+const execFileAsync = promisify(execFile)
+
 const discService = new DiscDetectionService()
+const makemkvService = new MakeMKVService()
 
 export function registerDiscHandlers(): void {
   ipcMain.handle(IPC.DISC_SCAN, async () => {
@@ -67,6 +73,46 @@ export function registerDiscHandlers(): void {
     } catch (err) {
       console.warn('[disc-handlers] Failed to save TMDB cache:', err)
       return false
+    }
+  })
+
+  ipcMain.handle(IPC.DISC_STREAM_START, async (_event, discIndex: number) => {
+    try {
+      return await makemkvService.startStream(discIndex)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn('[disc-handlers] Stream start failed:', msg)
+      return { port: 0, error: msg }
+    }
+  })
+
+  ipcMain.handle(IPC.DISC_STREAM_STOP, async () => {
+    makemkvService.stopStream()
+    return { success: true }
+  })
+
+  ipcMain.handle(IPC.DISC_EJECT, async (_event, driveIndex: number) => {
+    try {
+      // Get the drive's device path from a fresh scan
+      const drives = await discService.scanDrives()
+      const drive = drives.find(d => d.index === driveIndex)
+
+      if (process.platform === 'darwin') {
+        // macOS: drutil eject works for any optical drive
+        await execFileAsync('drutil', ['eject'])
+        return { success: true }
+      } else if (process.platform === 'linux') {
+        // Linux: eject command with device path
+        const device = drive?.devicePath || `/dev/sr${driveIndex}`
+        await execFileAsync('eject', [device])
+        return { success: true }
+      } else {
+        return { success: false, error: 'Eject not supported on this platform' }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn('[disc-handlers] Eject failed:', msg)
+      return { success: false, error: msg }
     }
   })
 }

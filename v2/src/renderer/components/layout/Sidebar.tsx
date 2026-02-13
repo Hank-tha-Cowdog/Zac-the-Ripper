@@ -1,9 +1,12 @@
 import React from 'react'
-import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Disc3, Activity, Clock, Settings } from 'lucide-react'
+import { NavLink, useNavigate } from 'react-router-dom'
+import { LayoutDashboard, Disc3, Play, Activity, Clock, Settings, RefreshCw, ArrowUpFromLine } from 'lucide-react'
+import { useDiscStore } from '../../stores/disc-store'
+import { useDiscDetection } from '../../hooks/useDiscDetection'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/preview', icon: Play, label: 'Preview' },
   { to: '/rip', icon: Disc3, label: 'Rip Disc' },
   { to: '/progress', icon: Activity, label: 'Progress' },
   { to: '/history', icon: Clock, label: 'History' },
@@ -11,6 +14,21 @@ const navItems = [
 ]
 
 export function Sidebar() {
+  const navigate = useNavigate()
+  const { discInfo, selectedDrive, scanning } = useDiscStore()
+  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
+
+  const handleRefresh = async () => {
+    await rescanDisc(true)
+  }
+
+  const handleEject = async () => {
+    await window.ztr.disc.eject(selectedDrive ?? 0)
+    useDiscStore.getState().setDiscInfo(null)
+    useDiscStore.getState().resetDiscSession()
+    navigate('/')
+  }
+
   return (
     <aside className="w-48 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
       <div className="p-4 border-b border-zinc-800 drag-region">
@@ -36,6 +54,45 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {/* ── Drive ─────────────────────────────── */}
+      <div className="px-3 py-2 border-t border-zinc-800">
+        <span className="label-tech text-[10px] text-zinc-600 uppercase tracking-wider">Drive</span>
+
+        {discInfo ? (
+          <div className="mt-1.5 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Disc3 className="w-3 h-3 text-purple-400 shrink-0" />
+              <span className="text-xs text-zinc-300 truncate">{discInfo.title}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="badge badge-default text-[9px]">{discInfo.discType}</span>
+              <span className="text-[10px] text-zinc-500">{discInfo.trackCount} titles</span>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-1.5 text-[10px] text-zinc-600">No disc detected</div>
+        )}
+
+        <div className="flex gap-1 mt-2">
+          <button
+            className="btn-ghost flex-1 flex items-center justify-center gap-1 text-xs py-1"
+            onClick={handleRefresh}
+            disabled={scanning}
+          >
+            <RefreshCw className={`w-3 h-3 ${scanning ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          <button
+            className="btn-ghost flex-1 flex items-center justify-center gap-1 text-xs py-1"
+            onClick={handleEject}
+            disabled={!discInfo}
+          >
+            <ArrowUpFromLine className="w-3 h-3" />
+            Eject
+          </button>
+        </div>
+      </div>
 
       <div className="p-3 border-t border-zinc-800">
         <div className="label-tech">System</div>

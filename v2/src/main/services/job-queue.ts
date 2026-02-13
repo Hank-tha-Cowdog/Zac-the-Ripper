@@ -1,12 +1,12 @@
 import { BrowserWindow } from 'electron'
 import { randomUUID } from 'crypto'
 import { tmpdir, homedir } from 'os'
-import { join } from 'path'
-import { mkdirSync, rmSync } from 'fs'
+import { join, dirname } from 'path'
+import { mkdirSync, rmSync, copyFileSync } from 'fs'
 import { MakeMKVService } from './makemkv'
 import { FFmpegService } from './ffmpeg'
 import { FFprobeService } from './ffprobe'
-import { KodiOutputService } from './kodi-output'
+import { KodiOutputService, EXTRAS_FOLDER_MAP } from './kodi-output'
 import { TMDBService } from './tmdb'
 import type { DiscInfo } from './disc-detection'
 import * as jobQueries from '../database/queries/jobs'
@@ -16,6 +16,7 @@ import { getSetting } from '../database/queries/settings'
 import { getEncodingArgs } from '../encoding-presets'
 import { createLogger } from '../util/logger'
 import { IPC } from '../../shared/ipc-channels'
+import { notifyJobComplete, notifyJobFailed } from './notify'
 
 const log = createLogger('job-queue')
 
@@ -57,6 +58,7 @@ export class JobQueueService {
     modes: string[]
     preserveInterlaced: boolean
     convertSubsToSrt: boolean
+    trackMeta?: Array<{ titleId: number; category: string; name: string }>
     kodiOptions?: unknown
     discSetId?: number
     discNumber?: number
@@ -78,21 +80,40 @@ export class JobQueueService {
       disc_number: discNumber
     })
 
-    // ── kodi_export: full pipeline — extract → encode → organize ────────
-    if (modes.includes('kodi_export')) {
-      const kodiLibraryPath = expandPath(getSetting('kodi.library_path') || '')
-      const kodiJob = jobQueries.createJob({
+    // ── Media library export: full pipeline — extract → encode → organize ────
+    // Jellyfin, Plex, and Kodi all use identical folder structure and NFO format
+    const isJellyfin = modes.includes('jellyfin_export')
+    const isPlex = modes.includes('plex_export')
+    const isKodi = modes.includes('kodi_export')
+
+    if (isJellyfin || isPlex || isKodi) {
+      // Collect all enabled library paths in priority order
+      const libraryTargets: Array<{ type: string; path: string }> = []
+      if (isJellyfin) libraryTargets.push({ type: 'jellyfin_export', path: expandPath(getSetting('jellyfin.library_path') || '') })
+      if (isPlex) libraryTargets.push({ type: 'plex_export', path: expandPath(getSetting('plex.library_path') || '') })
+      if (isKodi) libraryTargets.push({ type: 'kodi_export', path: expandPath(getSetting('kodi.library_path') || '') })
+
+      // Primary target: first enabled library; additional targets get copies
+      const primaryType = libraryTargets[0].type
+      const primaryPath = libraryTargets[0].path
+      const additionalPaths = libraryTargets.slice(1).map(t => t.path).filter(Boolean)
+
+      // Use jellyfin_export or kodi_export as DB job type (plex uses jellyfin_export since format is identical)
+      const dbJobType = (primaryType === 'kodi_export' ? 'kodi_export' : 'jellyfin_export') as 'kodi_export' | 'jellyfin_export'
+
+      const job = jobQueries.createJob({
         disc_id: disc.id,
-        job_type: 'kodi_export',
-        output_path: kodiLibraryPath || outputDir
+        job_type: dbJobType,
+        output_path: primaryPath || outputDir
       })
 
       const jobId = randomUUID()
-      this.queue.push({ id: jobId, dbId: kodiJob.id, type: 'kodi_export', status: 'pending' })
+      this.queue.push({ id: jobId, dbId: job.id, type: primaryType, status: 'pending' })
 
-      log.info(`[kodi] Created kodi_export job ${jobId} — library=${kodiLibraryPath}, staging=${outputDir}`)
+      log.info(`[media-lib] Created ${primaryType} job ${jobId} — library=${primaryPath}` +
+        (additionalPaths.length > 0 ? `, additional=[${additionalPaths.join(', ')}]` : ''))
 
-      this.executeKodiPipeline(jobId, kodiJob.id, {
+      this.executeMediaLibraryPipeline(jobId, job.id, {
         discIndex,
         titleIds,
         outputDir,
@@ -101,15 +122,17 @@ export class JobQueueService {
         modes,
         preserveInterlaced: params.preserveInterlaced,
         convertSubsToSrt: params.convertSubsToSrt,
+        trackMeta: params.trackMeta,
         kodiOptions: params.kodiOptions,
         discId: disc.id,
-        kodiLibraryPath,
+        primaryLibraryPath: primaryPath,
+        additionalLibraryPaths: additionalPaths,
         discSetId,
         discNumber,
         discInfo: discInfo || undefined
       })
 
-      return { jobId, dbId: kodiJob.id }
+      return { jobId, dbId: job.id }
     }
 
     // Create MKV rip job if mkv_rip mode is enabled
@@ -233,6 +256,7 @@ export class JobQueueService {
           jobId,
           outputFiles: result.outputFiles
         })
+        notifyJobComplete('MKV Rip', result.outputFiles[0]).catch(() => {})
 
         // Queue follow-up encoding jobs
         for (const filePath of result.outputFiles) {
@@ -263,26 +287,32 @@ export class JobQueueService {
         jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
         this.updateQueueItem(jobId, 'failed')
         window.webContents.send(IPC.RIP_ERROR, { jobId, error: result.error })
+        notifyJobFailed('MKV Rip', result.error).catch(() => {})
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
       window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      notifyJobFailed('MKV Rip', msg).catch(() => {})
     }
   }
 
   /**
-   * Kodi export pipeline — disc extraction → HEVC encoding → Kodi organization.
+   * Media library export pipeline — disc extraction → HEVC encoding → library organization.
+   * Works for both Jellyfin and Kodi (identical folder structure and NFO format).
    *
    * Architecture:
-   *   Disc → MakeMKV → temp staging MKV → FFmpeg encode → Kodi library
+   *   Disc → MakeMKV → temp staging MKV → FFmpeg encode → primary library
+   *   (optional) → copy to secondary library
    *
    * MakeMKV extracts the MKV to a temp staging directory. After extraction
-   * completes, FFmpeg encodes HEVC and writes to the final Kodi directory.
+   * completes, FFmpeg encodes HEVC and writes to the final library directory.
    * TMDB metadata and artwork are fetched concurrently during extraction.
+   * If a secondary library path is provided (dual Jellyfin + Kodi), the
+   * encoded file, NFO, and artwork are copied to it after primary finalization.
    */
-  private async executeKodiPipeline(jobId: string, dbId: number, params: {
+  private async executeMediaLibraryPipeline(jobId: string, dbId: number, params: {
     discIndex: number
     titleIds: number[]
     outputDir: string
@@ -291,9 +321,11 @@ export class JobQueueService {
     modes: string[]
     preserveInterlaced: boolean
     convertSubsToSrt: boolean
+    trackMeta?: Array<{ titleId: number; category: string; name: string }>
     kodiOptions?: unknown
     discId: number
-    kodiLibraryPath: string
+    primaryLibraryPath: string
+    additionalLibraryPaths?: string[]
     discSetId?: number
     discNumber?: number
     discInfo?: DiscInfo
@@ -302,9 +334,10 @@ export class JobQueueService {
     const opts = params.kodiOptions as {
       mediaType?: string; title?: string; year?: string; tmdbId?: number
       edition?: string; isExtrasDisc?: boolean; setName?: string; setOverview?: string
+      soundVersion?: string; discNumber?: number; totalDiscs?: number
     } | undefined
 
-    const kodiLibraryPath = params.kodiLibraryPath
+    const primaryLibraryPath = params.primaryLibraryPath
     const movieTitle = opts?.title || 'Unknown'
     const movieYear = parseInt(opts?.year || '') || new Date().getFullYear()
 
@@ -314,7 +347,7 @@ export class JobQueueService {
     // ── Create temp staging directory for intermediate MKV ─────────
     const stagingDir = join(tmpdir(), `ztr_stage_${jobId.slice(0, 8)}`)
     mkdirSync(stagingDir, { recursive: true })
-    log.info(`[kodi] Staging dir: ${stagingDir}`)
+    log.info(`[media-lib] Staging dir: ${stagingDir}`)
 
     // Progress state — pipeline manages its own unified progress
     // Weighted steps: Rip 0-50%, Encode 50-90%, Kodi org 90-100%
@@ -328,20 +361,23 @@ export class JobQueueService {
     }
 
     try {
-      // ── Determine final Kodi output paths ───────────────────────
-      if (!kodiLibraryPath) throw new Error('Kodi library path not configured — set it in Settings > Kodi')
+      // ── Determine final library output paths ──────────────────────
+      if (!primaryLibraryPath) throw new Error('Library path not configured — set it in Settings > Jellyfin or Settings > Kodi')
 
-      const { videoPath: finalVideoPath, outputDir: kodiOutputDir } = this.kodiService.buildMoviePath({
-        libraryPath: kodiLibraryPath,
+      const { videoPath: finalVideoPath, outputDir: libraryOutputDir } = this.kodiService.buildMoviePath({
+        libraryPath: primaryLibraryPath,
         title: movieTitle,
         year: movieYear,
         edition: opts?.edition,
+        soundVersion: opts?.soundVersion,
+        discNumber: opts?.discNumber,
+        totalDiscs: opts?.totalDiscs,
         isExtrasDisc: opts?.isExtrasDisc
       })
 
-      mkdirSync(kodiOutputDir, { recursive: true })
-      log.info(`[kodi] Kodi output dir: ${kodiOutputDir}`)
-      log.info(`[kodi] Final video path: ${finalVideoPath}`)
+      mkdirSync(libraryOutputDir, { recursive: true })
+      log.info(`[media-lib] Output dir: ${libraryOutputDir}`)
+      log.info(`[media-lib] Final video path: ${finalVideoPath}`)
 
       // ── Fetch TMDB metadata + artwork concurrently with rip ─────
       let tmdbDetails: Awaited<ReturnType<TMDBService['getDetails']>> = null
@@ -352,7 +388,7 @@ export class JobQueueService {
         if (!opts?.tmdbId) return
         try {
           tmdbDetails = await this.tmdbService.getDetails(opts.tmdbId, opts.mediaType || 'movie')
-          log.info(`[kodi] TMDB details fetched: "${tmdbDetails?.title}" (${tmdbDetails?.imdb_id || 'no IMDB'})`)
+          log.info(`[media-lib] TMDB details fetched: "${tmdbDetails?.title}" (${tmdbDetails?.imdb_id || 'no IMDB'})`)
 
           if (tmdbDetails?.poster_path) {
             const dest = join(tmpdir(), `ztr_poster_${opts.tmdbId}.jpg`)
@@ -365,19 +401,19 @@ export class JobQueueService {
             if (dl.success) fanartLocalPath = dest
           }
         } catch (err) {
-          log.warn(`[kodi] TMDB fetch failed (non-fatal): ${err}`)
+          log.warn(`[media-lib] TMDB fetch failed (non-fatal): ${err}`)
         }
       })()
 
       // ── Determine encoding preset ──
       const codec = getSetting('encoding.codec') || 'hevc'
       const preset = codec === 'hevc' ? 'hevc' : 'h264'
-      log.info(`[kodi] Codec preset: ${preset}`)
+      log.info(`[media-lib] Codec preset: ${preset}`)
 
       // ── Step 1: Extract from disc ──────────────────────────────────
       sendProgress(0, 'Step 1/3 — Starting disc extraction...')
 
-      log.info(`[kodi] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
+      log.info(`[media-lib] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
 
       const extractResult = await makemkvService.ripTitles({
         jobId,
@@ -399,8 +435,16 @@ export class JobQueueService {
         throw new Error(extractResult.error || 'MKV extraction produced no files')
       }
 
-      log.info(`[kodi] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted`)
-      const stagingMkvPath = extractResult.outputFiles[0]
+      log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted`)
+
+      // ── Determine main feature vs extras from trackMeta ──────────
+      const trackMetaList = params.trackMeta
+      let mainFileIndex = 0
+      if (trackMetaList && trackMetaList.length > 0) {
+        const mainMeta = trackMetaList.findIndex(m => m.category === 'main')
+        if (mainMeta >= 0) mainFileIndex = mainMeta
+      }
+      const stagingMkvPath = extractResult.outputFiles[mainFileIndex]
 
       // ── Step 2: Encode the complete MKV ──────────────────────────
       phase = 'encode'
@@ -411,9 +455,13 @@ export class JobQueueService {
       try {
         // Analyze the complete staging MKV with ffprobe
         const completeMediaInfo = await this.ffprobeService.analyze(stagingMkvPath)
-        log.info(`[kodi] ffprobe: ${completeMediaInfo.videoStreams[0]?.width}x${completeMediaInfo.videoStreams[0]?.height} ` +
-          `${completeMediaInfo.audioStreams.length} audio, ${completeMediaInfo.subtitleStreams.length} subs, ` +
-          `duration=${completeMediaInfo.duration.toFixed(1)}s`)
+        const v = completeMediaInfo.videoStreams[0]
+        log.info(`[media-lib] ffprobe video: ${v?.codec} ${v?.width}x${v?.height} ` +
+          `DAR=${v?.displayAspectRatio} ${v?.framerate}fps ` +
+          `field=${v?.fieldOrder} ${v?.bitDepth}bit ${v?.pixelFormat} ` +
+          `color=${v?.colorSpace}/${v?.colorPrimaries}/${v?.colorTransfer} range=${v?.colorRange}`)
+        log.info(`[media-lib] ffprobe: ${completeMediaInfo.audioStreams.length} audio, ` +
+          `${completeMediaInfo.subtitleStreams.length} subs, duration=${completeMediaInfo.duration.toFixed(1)}s`)
 
         // Build encoding args with accurate ffprobe data
         const encodeArgs = getEncodingArgs(preset, {
@@ -421,7 +469,7 @@ export class JobQueueService {
           preserveInterlaced: params.preserveInterlaced,
           convertSubsToSrt: params.convertSubsToSrt
         })
-        log.info(`[kodi] FFmpeg args: ${encodeArgs.join(' ')}`)
+        log.info(`[media-lib] FFmpeg args: ${encodeArgs.join(' ')}`)
 
         encodeResult = await this.ffmpegService.encode({
           jobId,
@@ -441,13 +489,13 @@ export class JobQueueService {
         })
 
         if (encodeResult.success) {
-          log.info(`[kodi] Encode succeeded: ${finalVideoPath}`)
+          log.info(`[media-lib] Encode succeeded: ${finalVideoPath}`)
         } else {
-          log.error(`[kodi] Encode failed: ${encodeResult.error}`)
+          log.error(`[media-lib] Encode failed: ${encodeResult.error}`)
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        log.error(`[kodi] Encode crashed: ${msg}`)
+        log.error(`[media-lib] Encode crashed: ${msg}`)
         encodeResult = { success: false, error: msg }
       }
 
@@ -455,7 +503,7 @@ export class JobQueueService {
         throw new Error(encodeResult.error || 'HEVC encoding failed')
       }
 
-      log.info(`[kodi] Encode complete: ${finalVideoPath}`)
+      log.info(`[media-lib] Encode complete: ${finalVideoPath}`)
 
       // Record output files in DB
       outputFileQueries.createOutputFile({
@@ -465,15 +513,68 @@ export class JobQueueService {
         video_codec: preset === 'hevc' ? 'hevc' : 'h264'
       })
 
-      // ── Finalize: NFO, artwork, Kodi structure ──────────────────
+      // ── Encode extras tracks ──────────────────────────────────────
+      const extrasOutputFiles: string[] = []
+      if (trackMetaList && trackMetaList.length > 1 && extractResult.outputFiles.length > 1) {
+        const extrasEntries = trackMetaList
+          .map((meta, i) => ({ meta, file: extractResult.outputFiles[i] }))
+          .filter((_, i) => i !== mainFileIndex)
+
+        for (let ei = 0; ei < extrasEntries.length; ei++) {
+          const { meta: extraMeta, file: extrasFile } = extrasEntries[ei]
+          const categoryFolder = EXTRAS_FOLDER_MAP[extraMeta.category] || 'Other'
+          const extrasDir = join(libraryOutputDir, categoryFolder)
+          mkdirSync(extrasDir, { recursive: true })
+
+          // Sanitize filename
+          const safeName = extraMeta.name.replace(/[<>:"/\\|?*]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
+          const extrasOutputPath = join(extrasDir, `${safeName}.mkv`)
+
+          log.info(`[media-lib] Encoding extra ${ei + 1}/${extrasEntries.length}: "${extraMeta.name}" (${extraMeta.category}) → ${extrasOutputPath}`)
+          sendProgress(90 + (ei / extrasEntries.length) * 2, `Step 2/3 — Encoding extra: ${extraMeta.name}`)
+
+          try {
+            const extrasMediaInfo = await this.ffprobeService.analyze(extrasFile)
+            const extrasEncodeArgs = getEncodingArgs(preset, {
+              mediaInfo: extrasMediaInfo,
+              preserveInterlaced: params.preserveInterlaced,
+              convertSubsToSrt: params.convertSubsToSrt
+            })
+
+            const extrasEncodeResult = await this.ffmpegService.encode({
+              jobId: `${jobId}_extra_${ei}`,
+              inputPath: extrasFile,
+              outputPath: extrasOutputPath,
+              args: extrasEncodeArgs,
+              totalDuration: extrasMediaInfo.duration,
+              window,
+              onProgress: (pct) => {
+                sendProgress(90 + ((ei + pct / 100) / extrasEntries.length) * 2,
+                  `Step 2/3 — Encoding extra: ${extraMeta.name} ${pct.toFixed(0)}%`)
+              }
+            })
+
+            if (extrasEncodeResult.success) {
+              extrasOutputFiles.push(extrasOutputPath)
+              log.info(`[media-lib] Extra encoded: ${extrasOutputPath}`)
+            } else {
+              log.warn(`[media-lib] Extra encode failed (non-fatal): ${extrasEncodeResult.error}`)
+            }
+          } catch (err) {
+            log.warn(`[media-lib] Extra encode crashed (non-fatal): ${err}`)
+          }
+        }
+      }
+
+      // ── Finalize: NFO, artwork, library structure ─────────────────
       phase = 'kodi-org'
-      sendProgress(92, 'Step 3/3 — Organizing for Kodi (NFO, artwork)...')
+      sendProgress(92, 'Step 3/3 — Organizing library (NFO, artwork)...')
 
       // Wait for TMDB fetch to complete (likely already done)
       await tmdbPromise
 
-      this.kodiService.finalizeMovie({
-        libraryPath: kodiLibraryPath,
+      const finalizeParams = {
+        libraryPath: primaryLibraryPath,
         title: movieTitle,
         year: movieYear,
         sourceFile: finalVideoPath,
@@ -495,17 +596,57 @@ export class JobQueueService {
         isExtrasDisc: opts?.isExtrasDisc,
         setName: opts?.setName,
         setOverview: opts?.setOverview,
-        discNumber: params.discNumber
-      })
+        discNumber: opts?.discNumber,
+        totalDiscs: opts?.totalDiscs,
+        soundVersion: opts?.soundVersion
+      }
 
-      log.info(`[kodi] Kodi organization complete`)
+      this.kodiService.finalizeMovie(finalizeParams)
+      log.info(`[media-lib] Primary library organized: ${primaryLibraryPath}`)
+
+      // ── Copy to additional libraries (Jellyfin + Plex + Kodi multi-output) ──
+      if (params.additionalLibraryPaths && params.additionalLibraryPaths.length > 0) {
+        sendProgress(95, `Step 3/3 — Copying to ${params.additionalLibraryPaths.length} additional librar${params.additionalLibraryPaths.length > 1 ? 'ies' : 'y'}...`)
+        for (const additionalPath of params.additionalLibraryPaths) {
+          try {
+            const { videoPath: additionalVideoPath, outputDir: additionalDir } =
+              this.kodiService.buildMoviePath({
+                libraryPath: additionalPath,
+                title: movieTitle,
+                year: movieYear,
+                edition: opts?.edition,
+                soundVersion: opts?.soundVersion,
+                discNumber: opts?.discNumber,
+                totalDiscs: opts?.totalDiscs,
+                isExtrasDisc: opts?.isExtrasDisc
+              })
+            mkdirSync(additionalDir, { recursive: true })
+            copyFileSync(finalVideoPath, additionalVideoPath)
+            this.kodiService.finalizeMovie({
+              ...finalizeParams,
+              libraryPath: additionalPath,
+              videoAlreadyAtPath: additionalVideoPath
+            })
+            // Copy extras subfolders to additional library
+            for (const extrasFile of extrasOutputFiles) {
+              const relPath = extrasFile.slice(libraryOutputDir.length)
+              const destPath = join(additionalDir, relPath)
+              mkdirSync(dirname(destPath), { recursive: true })
+              copyFileSync(extrasFile, destPath)
+            }
+            log.info(`[media-lib] Additional library organized: ${additionalPath}`)
+          } catch (err) {
+            log.warn(`[media-lib] Additional library copy failed (non-fatal): ${err}`)
+          }
+        }
+      }
 
       // ── Clean up staging directory ──────────────────────────────
       try {
         rmSync(stagingDir, { recursive: true, force: true })
-        log.info(`[kodi] Staging dir cleaned up: ${stagingDir}`)
+        log.info(`[media-lib] Staging dir cleaned up: ${stagingDir}`)
       } catch (err) {
-        log.warn(`[kodi] Failed to clean staging dir: ${err}`)
+        log.warn(`[media-lib] Failed to clean staging dir: ${err}`)
       }
 
       // ── Queue additional follow-up jobs if other modes enabled ──
@@ -539,14 +680,16 @@ export class JobQueueService {
       jobQueries.updateJobStatus(dbId, 'completed')
       this.updateQueueItem(jobId, 'completed')
       window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: [finalVideoPath] })
+      notifyJobComplete(movieTitle, finalVideoPath).catch(() => {})
 
-      log.info(`[kodi] Pipeline complete — ${finalVideoPath}`)
+      log.info(`[media-lib] Pipeline complete — ${finalVideoPath}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      log.error(`[kodi] Pipeline failed: ${msg}`)
+      log.error(`[media-lib] Pipeline failed: ${msg}`)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
       window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      notifyJobFailed(movieTitle, msg).catch(() => {})
 
       // Clean up staging on failure too
       try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}

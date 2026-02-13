@@ -1,4 +1,5 @@
-import React, { useState, useRef, useCallback } from 'react'
+import React, { useState, useRef, useCallback, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { HelpCircle } from 'lucide-react'
 
 type TooltipPosition = 'top' | 'bottom' | 'left' | 'right'
@@ -16,18 +17,17 @@ export function Tooltip({ content, children, position = 'top', inline = false, c
   const [visible, setVisible] = useState(false)
   const [coords, setCoords] = useState({ x: 0, y: 0 })
   const triggerRef = useRef<HTMLSpanElement>(null)
+  const tooltipRef = useRef<HTMLDivElement>(null)
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>()
 
   const show = useCallback(() => {
     clearTimeout(timeoutRef.current)
     timeoutRef.current = setTimeout(() => {
-      if (triggerRef.current) {
-        const rect = triggerRef.current.getBoundingClientRect()
-        setCoords({
-          x: rect.left + rect.width / 2,
-          y: position === 'bottom' ? rect.bottom : rect.top
-        })
-      }
+      if (!triggerRef.current) return
+      const rect = triggerRef.current.getBoundingClientRect()
+      let x = rect.left + rect.width / 2
+      let y = position === 'bottom' ? rect.bottom + 8 : rect.top - 8
+      setCoords({ x, y })
       setVisible(true)
     }, 300)
   }, [position])
@@ -37,19 +37,48 @@ export function Tooltip({ content, children, position = 'top', inline = false, c
     setVisible(false)
   }, [])
 
-  const positionClasses: Record<TooltipPosition, string> = {
-    top: 'bottom-full left-1/2 -translate-x-1/2 mb-2',
-    bottom: 'top-full left-1/2 -translate-x-1/2 mt-2',
-    left: 'right-full top-1/2 -translate-y-1/2 mr-2',
-    right: 'left-full top-1/2 -translate-y-1/2 ml-2'
-  }
+  // Post-render viewport clamping
+  useEffect(() => {
+    if (!visible || !tooltipRef.current) return
+    const el = tooltipRef.current
+    const r = el.getBoundingClientRect()
+    const pad = 8
 
-  const arrowClasses: Record<TooltipPosition, string> = {
-    top: 'top-full left-1/2 -translate-x-1/2 border-t-zinc-700 border-x-transparent border-b-transparent',
-    bottom: 'bottom-full left-1/2 -translate-x-1/2 border-b-zinc-700 border-x-transparent border-t-transparent',
-    left: 'left-full top-1/2 -translate-y-1/2 border-l-zinc-700 border-y-transparent border-r-transparent',
-    right: 'right-full top-1/2 -translate-y-1/2 border-r-zinc-700 border-y-transparent border-l-transparent'
-  }
+    let adjustX = 0
+    let adjustY = 0
+    if (r.right > window.innerWidth - pad) adjustX = window.innerWidth - pad - r.right
+    if (r.left < pad) adjustX = pad - r.left
+    if (r.bottom > window.innerHeight - pad) adjustY = window.innerHeight - pad - r.bottom
+    if (r.top < pad) adjustY = pad - r.top
+
+    if (adjustX || adjustY) {
+      setCoords(prev => ({ x: prev.x + adjustX, y: prev.y + adjustY }))
+    }
+  }, [visible])
+
+  useEffect(() => {
+    return () => clearTimeout(timeoutRef.current)
+  }, [])
+
+  const tooltipEl = visible ? createPortal(
+    <div
+      ref={tooltipRef}
+      role="tooltip"
+      className="fixed z-[9999] pointer-events-none"
+      style={{
+        left: coords.x,
+        top: coords.y,
+        transform: position === 'bottom'
+          ? 'translateX(-50%)'
+          : 'translateX(-50%) translateY(-100%)'
+      }}
+    >
+      <span className="tooltip-bubble">
+        {content}
+      </span>
+    </div>,
+    document.body
+  ) : null
 
   return (
     <span
@@ -65,18 +94,7 @@ export function Tooltip({ content, children, position = 'top', inline = false, c
       ) : (
         children
       )}
-
-      {visible && (
-        <span
-          role="tooltip"
-          className={`absolute z-[100] ${positionClasses[position]} pointer-events-none`}
-        >
-          <span className="tooltip-bubble">
-            {content}
-          </span>
-          <span className={`absolute w-0 h-0 border-4 ${arrowClasses[position]}`} />
-        </span>
-      )}
+      {tooltipEl}
     </span>
   )
 }

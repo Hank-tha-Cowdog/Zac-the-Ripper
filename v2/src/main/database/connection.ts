@@ -56,6 +56,10 @@ function runMigrations(): void {
 
   const insertMigration = database.prepare('INSERT INTO _migrations (name) VALUES (?)')
 
+  // Disable foreign keys during migrations — table recreations (DROP + CREATE)
+  // will fail if referencing tables still point to the old table
+  database.pragma('foreign_keys = OFF')
+
   for (const migration of migrations) {
     if (!applied.has(migration.name)) {
       database.exec(migration.sql)
@@ -63,6 +67,8 @@ function runMigrations(): void {
       console.log(`Applied migration: ${migration.name}`)
     }
   }
+
+  database.pragma('foreign_keys = ON')
 }
 
 function getInlineMigrations(): Array<{ name: string; sql: string }> {
@@ -182,7 +188,8 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
       sql: `
         -- SQLite doesn't support ALTER CHECK constraints, so we recreate the jobs table
         -- with the updated CHECK constraint that includes hevc_encode
-        CREATE TABLE IF NOT EXISTS jobs_new (
+        DROP TABLE IF EXISTS jobs_new;
+        CREATE TABLE jobs_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           disc_id INTEGER REFERENCES discs(id),
           job_type TEXT NOT NULL CHECK(job_type IN ('mkv_rip', 'raw_capture', 'ffv1_encode', 'h264_encode', 'hevc_encode', 'kodi_export')),
@@ -252,6 +259,62 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
       name: '013_lower_hevc_quality_default',
       sql: `
         UPDATE settings SET value = '65' WHERE key = 'encoding.hevc_quality' AND value = '95';
+      `
+    },
+    {
+      name: '014_add_jellyfin_export_job_type',
+      sql: `
+        DROP TABLE IF EXISTS jobs_new;
+        CREATE TABLE jobs_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          disc_id INTEGER REFERENCES discs(id),
+          job_type TEXT NOT NULL CHECK(job_type IN ('mkv_rip', 'raw_capture', 'ffv1_encode', 'h264_encode', 'hevc_encode', 'kodi_export', 'jellyfin_export')),
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+          progress REAL DEFAULT 0,
+          input_path TEXT,
+          output_path TEXT,
+          encoding_preset TEXT,
+          error_message TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          duration_seconds REAL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO jobs_new SELECT * FROM jobs;
+        DROP TABLE jobs;
+        ALTER TABLE jobs_new RENAME TO jobs;
+        CREATE INDEX IF NOT EXISTS idx_jobs_disc ON jobs(disc_id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('general.mode_jellyfin_export', 'true', 'general');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('jellyfin.library_path', '', 'jellyfin');
+      `
+    },
+    {
+      name: '015_seed_plex_settings',
+      sql: `
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('general.mode_plex_export', 'false', 'plex');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('plex.library_path', '', 'plex');
+      `
+    },
+    {
+      name: '016_seed_notification_settings',
+      sql: `
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('notifications.enabled', 'false', 'notifications');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('notifications.ntfy_topic', '', 'notifications');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('notifications.ntfy_server', 'https://ntfy.sh', 'notifications');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('notifications.on_complete', 'true', 'notifications');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('notifications.on_failure', 'true', 'notifications');
+      `
+    }
+    ,
+    {
+      name: '017_seed_sound_version_disc_number_settings',
+      sql: `
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.sound_version', '', 'rip');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.custom_sound_version', '', 'rip');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.disc_number', '', 'rip');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.total_discs', '', 'rip');
       `
     }
   ]

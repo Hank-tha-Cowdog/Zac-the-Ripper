@@ -20,8 +20,11 @@ export interface MediaInfo {
 export interface VideoStreamInfo {
   index: number
   codec: string
+  codecLongName: string
   width: number
   height: number
+  displayAspectRatio: string
+  sampleAspectRatio: string
   framerate: string
   framerateNum: number
   framerateDen: number
@@ -32,7 +35,10 @@ export interface VideoStreamInfo {
   colorSpace: string
   colorTransfer: string
   colorPrimaries: string
+  colorRange: string
   isHDR: boolean
+  profile: string
+  level: string
 }
 
 export interface AudioStreamInfo {
@@ -153,8 +159,11 @@ export class FFprobeService {
         return {
           index: s.index as number,
           codec: s.codec_name as string,
+          codecLongName: (s.codec_long_name as string) || '',
           width: s.width as number,
           height: s.height as number,
+          displayAspectRatio: (s.display_aspect_ratio as string) || '',
+          sampleAspectRatio: (s.sample_aspect_ratio as string) || '1:1',
           framerate: `${(frNum / frDen).toFixed(3)}`,
           framerateNum: frNum,
           framerateDen: frDen,
@@ -165,7 +174,10 @@ export class FFprobeService {
           colorSpace: (s.color_space as string) || '',
           colorTransfer,
           colorPrimaries: (s.color_primaries as string) || '',
-          isHDR: colorTransfer.includes('smpte2084') || colorTransfer.includes('arib-std-b67')
+          colorRange: (s.color_range as string) || '',
+          isHDR: colorTransfer.includes('smpte2084') || colorTransfer.includes('arib-std-b67'),
+          profile: (s.profile as string) || '',
+          level: String(s.level ?? '')
         }
       })
 

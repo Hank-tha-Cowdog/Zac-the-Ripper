@@ -21,6 +21,7 @@ export interface DiscInfo {
   title: string
   discType: 'DVD' | 'BD' | 'UHD_BD'
   discId: string
+  fingerprint: string
   trackCount: number
   tracks: TrackInfo[]
   metadata: Record<string, string>
@@ -59,6 +60,10 @@ export interface SubtitleTrack {
 export class DiscDetectionService {
   // Track last scan result to suppress repetitive logging
   private lastScanHash = ''
+  // Mutex: when a full disc scan (getDiscInfo) is running, block polling scans
+  // to prevent MakeMKV concurrent access failures
+  private fullScanInProgress = false
+  private lastDrives: DriveInfo[] = []
 
   private getMakeMKVPath(): string | null {
     const settingPath = getSetting('tools.makemkvcon_path')
@@ -71,6 +76,13 @@ export class DiscDetectionService {
   }
 
   async scanDrives(): Promise<DriveInfo[]> {
+    // If a full disc scan is in progress, return cached drives to avoid
+    // MakeMKV concurrent access failures (only one instance can run at a time)
+    if (this.fullScanInProgress) {
+      log.debug('scanDrives: skipped — full disc scan in progress, returning cached drives')
+      return this.lastDrives
+    }
+
     // Get hardware drive list from MakeMKV (gives drive model name)
     // Then enrich with OS-level detection (gives disc title, device path, disc type)
     // MakeMKV --noscan doesn't reliably detect disc presence on macOS
@@ -114,6 +126,7 @@ export class DiscDetectionService {
     } else {
       log.debug('scanDrives: no change')
     }
+    this.lastDrives = drives
     return drives
   }
 
@@ -318,10 +331,17 @@ export class DiscDetectionService {
   }
 
   async getDiscInfo(discIndex: number): Promise<DiscInfo | null> {
-    if (this.hasMakeMKV()) {
-      return this.getDiscInfoViaMakeMKV(discIndex)
+    this.fullScanInProgress = true
+    log.info(`getDiscInfo(${discIndex}) — acquiring scan lock`)
+    try {
+      if (this.hasMakeMKV()) {
+        return await this.getDiscInfoViaMakeMKV(discIndex)
+      }
+      return await this.getDiscInfoViaOS(discIndex)
+    } finally {
+      this.fullScanInProgress = false
+      log.info(`getDiscInfo(${discIndex}) — scan lock released`)
     }
-    return this.getDiscInfoViaOS(discIndex)
   }
 
   // ─── OS-level disc info (limited, no track details) ──────────────────
@@ -362,6 +382,7 @@ export class DiscDetectionService {
         title: discTitle,
         discType,
         discId: devicePath,
+        fingerprint: `${devicePath}::0::`,
         trackCount: 0,
         tracks: [],
         metadata: {
@@ -415,7 +436,11 @@ export class DiscDetectionService {
             info.discType = 'DVD'
           }
 
-          log.info(`getDiscInfo result: title="${info.title}" type=${info.discType} discId="${info.discId}" tracks=${info.trackCount}`)
+          // Compute fingerprint from discId + track structure for reliable change detection
+          const trackFingerprint = info.tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+          info.fingerprint = `${info.discId}::${info.tracks.length}::${trackFingerprint}`
+
+          log.info(`getDiscInfo result: title="${info.title}" type=${info.discType} discId="${info.discId}" fingerprint="${info.fingerprint}" tracks=${info.trackCount}`)
           resolve(info as DiscInfo)
         }
       })
