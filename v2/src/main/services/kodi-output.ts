@@ -193,9 +193,6 @@ export class KodiOutputService {
       this.copyArtworkIfMissing(outputDir, artwork.keyart, 'keyart.jpg')
     }
 
-    // Create Extras/ folder
-    mkdirSync(join(outputDir, 'Extras'), { recursive: true })
-
     log.info(`Finalized movie at: ${outputDir} (NFO: ${nfoPath})`)
     return { nfoPath }
   }
@@ -248,9 +245,6 @@ export class KodiOutputService {
       this.copyArtworkIfMissing(outputDir, artwork.discart, 'discart.png')
       this.copyArtworkIfMissing(outputDir, artwork.keyart, 'keyart.jpg')
     }
-
-    // Create Extras/ folder (empty, ready for user to add special features)
-    mkdirSync(join(outputDir, 'Extras'), { recursive: true })
 
     log.info(`Exported movie to: ${outputDir}`)
     return { outputDir, nfoPath, moviePath }

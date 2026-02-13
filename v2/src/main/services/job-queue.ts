@@ -364,6 +364,20 @@ export class JobQueueService {
       // ── Determine final library output paths ──────────────────────
       if (!primaryLibraryPath) throw new Error('Library path not configured — set it in Settings > Jellyfin or Settings > Kodi')
 
+      // When trackMeta has categories, ignore isExtrasDisc — trackMeta takes precedence.
+      // isExtrasDisc is only used for legacy single-file-to-Extras mode (no trackMeta).
+      const hasTrackMeta = params.trackMeta && params.trackMeta.length > 0
+      const hasMainTrack = hasTrackMeta && params.trackMeta!.some(m => m.category === 'main')
+      const useExtrasDiscMode = opts?.isExtrasDisc && !hasTrackMeta
+
+      // Always compute the movie root dir (Movies/Title (Year)/) — extras subfolders go here
+      const { outputDir: movieRootDir } = this.kodiService.buildMoviePath({
+        libraryPath: primaryLibraryPath,
+        title: movieTitle,
+        year: movieYear
+      })
+
+      // Compute main feature path (may not be used if all tracks are extras)
       const { videoPath: finalVideoPath, outputDir: libraryOutputDir } = this.kodiService.buildMoviePath({
         libraryPath: primaryLibraryPath,
         title: movieTitle,
@@ -372,12 +386,17 @@ export class JobQueueService {
         soundVersion: opts?.soundVersion,
         discNumber: opts?.discNumber,
         totalDiscs: opts?.totalDiscs,
-        isExtrasDisc: opts?.isExtrasDisc
+        isExtrasDisc: useExtrasDiscMode
       })
 
-      mkdirSync(libraryOutputDir, { recursive: true })
+      // Skip main feature encode if trackMeta exists but has no 'main' category
+      const skipMainEncode = hasTrackMeta && !hasMainTrack
+
+      mkdirSync(movieRootDir, { recursive: true })
+      if (!skipMainEncode) mkdirSync(libraryOutputDir, { recursive: true })
+      log.info(`[media-lib] Movie root dir: ${movieRootDir}`)
       log.info(`[media-lib] Output dir: ${libraryOutputDir}`)
-      log.info(`[media-lib] Final video path: ${finalVideoPath}`)
+      log.info(`[media-lib] Final video path: ${finalVideoPath} (skipMainEncode=${skipMainEncode})`)
 
       // ── Fetch TMDB metadata + artwork concurrently with rip ─────
       let tmdbDetails: Awaited<ReturnType<TMDBService['getDetails']>> = null
@@ -444,86 +463,96 @@ export class JobQueueService {
         const mainMeta = trackMetaList.findIndex(m => m.category === 'main')
         if (mainMeta >= 0) mainFileIndex = mainMeta
       }
-      const stagingMkvPath = extractResult.outputFiles[mainFileIndex]
 
-      // ── Step 2: Encode the complete MKV ──────────────────────────
+      // ── Step 2: Encode main feature (if applicable) ──────────────
       phase = 'encode'
-      sendProgress(50, 'Step 2/3 — Analyzing extracted file...')
 
-      let encodeResult: { success: boolean; error?: string }
+      if (!skipMainEncode) {
+        const stagingMkvPath = extractResult.outputFiles[mainFileIndex]
+        sendProgress(50, 'Step 2/3 — Analyzing extracted file...')
 
-      try {
-        // Analyze the complete staging MKV with ffprobe
-        const completeMediaInfo = await this.ffprobeService.analyze(stagingMkvPath)
-        const v = completeMediaInfo.videoStreams[0]
-        log.info(`[media-lib] ffprobe video: ${v?.codec} ${v?.width}x${v?.height} ` +
-          `DAR=${v?.displayAspectRatio} ${v?.framerate}fps ` +
-          `field=${v?.fieldOrder} ${v?.bitDepth}bit ${v?.pixelFormat} ` +
-          `color=${v?.colorSpace}/${v?.colorPrimaries}/${v?.colorTransfer} range=${v?.colorRange}`)
-        log.info(`[media-lib] ffprobe: ${completeMediaInfo.audioStreams.length} audio, ` +
-          `${completeMediaInfo.subtitleStreams.length} subs, duration=${completeMediaInfo.duration.toFixed(1)}s`)
+        let encodeResult: { success: boolean; error?: string }
 
-        // Build encoding args with accurate ffprobe data
-        const encodeArgs = getEncodingArgs(preset, {
-          mediaInfo: completeMediaInfo,
-          preserveInterlaced: params.preserveInterlaced,
-          convertSubsToSrt: params.convertSubsToSrt
-        })
-        log.info(`[media-lib] FFmpeg args: ${encodeArgs.join(' ')}`)
+        try {
+          // Analyze the complete staging MKV with ffprobe
+          const completeMediaInfo = await this.ffprobeService.analyze(stagingMkvPath)
+          const v = completeMediaInfo.videoStreams[0]
+          log.info(`[media-lib] ffprobe video: ${v?.codec} ${v?.width}x${v?.height} ` +
+            `DAR=${v?.displayAspectRatio} ${v?.framerate}fps ` +
+            `field=${v?.fieldOrder} ${v?.bitDepth}bit ${v?.pixelFormat} ` +
+            `color=${v?.colorSpace}/${v?.colorPrimaries}/${v?.colorTransfer} range=${v?.colorRange}`)
+          log.info(`[media-lib] ffprobe: ${completeMediaInfo.audioStreams.length} audio, ` +
+            `${completeMediaInfo.subtitleStreams.length} subs, duration=${completeMediaInfo.duration.toFixed(1)}s`)
 
-        encodeResult = await this.ffmpegService.encode({
-          jobId,
-          inputPath: stagingMkvPath,
-          outputPath: finalVideoPath,
-          args: encodeArgs,
-          totalDuration: completeMediaInfo.duration,
-          window,
-          onProgress: (pct, speed) => {
-            encodePct = pct
-            encodeSpeed = speed
-            // Step 2/3: Encode maps to 50-90% of overall progress
-            const overall = 50 + (pct * 0.4)
-            const speedStr = speed ? ` @ ${speed.toFixed(1)}x` : ''
-            sendProgress(overall, `Step 2/3 — Encoding HEVC: ${pct.toFixed(0)}%${speedStr}`)
+          // Build encoding args with accurate ffprobe data
+          const encodeArgs = getEncodingArgs(preset, {
+            mediaInfo: completeMediaInfo,
+            preserveInterlaced: params.preserveInterlaced,
+            convertSubsToSrt: params.convertSubsToSrt
+          })
+          log.info(`[media-lib] FFmpeg args: ${encodeArgs.join(' ')}`)
+
+          encodeResult = await this.ffmpegService.encode({
+            jobId,
+            inputPath: stagingMkvPath,
+            outputPath: finalVideoPath,
+            args: encodeArgs,
+            totalDuration: completeMediaInfo.duration,
+            window,
+            onProgress: (pct, speed) => {
+              encodePct = pct
+              encodeSpeed = speed
+              // Step 2/3: Encode maps to 50-90% of overall progress
+              const overall = 50 + (pct * 0.4)
+              const speedStr = speed ? ` @ ${speed.toFixed(1)}x` : ''
+              sendProgress(overall, `Step 2/3 — Encoding HEVC: ${pct.toFixed(0)}%${speedStr}`)
+            }
+          })
+
+          if (encodeResult.success) {
+            log.info(`[media-lib] Encode succeeded: ${finalVideoPath}`)
+          } else {
+            log.error(`[media-lib] Encode failed: ${encodeResult.error}`)
           }
-        })
-
-        if (encodeResult.success) {
-          log.info(`[media-lib] Encode succeeded: ${finalVideoPath}`)
-        } else {
-          log.error(`[media-lib] Encode failed: ${encodeResult.error}`)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log.error(`[media-lib] Encode crashed: ${msg}`)
+          encodeResult = { success: false, error: msg }
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        log.error(`[media-lib] Encode crashed: ${msg}`)
-        encodeResult = { success: false, error: msg }
+
+        if (!encodeResult.success) {
+          throw new Error(encodeResult.error || 'HEVC encoding failed')
+        }
+
+        log.info(`[media-lib] Encode complete: ${finalVideoPath}`)
+
+        // Record output files in DB
+        outputFileQueries.createOutputFile({
+          job_id: dbId,
+          file_path: finalVideoPath,
+          format: 'mkv',
+          video_codec: preset === 'hevc' ? 'hevc' : 'h264'
+        })
+      } else {
+        log.info(`[media-lib] Skipping main feature encode — all tracks are extras`)
+        sendProgress(50, 'Step 2/3 — Encoding extras...')
       }
-
-      if (!encodeResult.success) {
-        throw new Error(encodeResult.error || 'HEVC encoding failed')
-      }
-
-      log.info(`[media-lib] Encode complete: ${finalVideoPath}`)
-
-      // Record output files in DB
-      outputFileQueries.createOutputFile({
-        job_id: dbId,
-        file_path: finalVideoPath,
-        format: 'mkv',
-        video_codec: preset === 'hevc' ? 'hevc' : 'h264'
-      })
 
       // ── Encode extras tracks ──────────────────────────────────────
+      // Extras category subfolders (Featurettes/, Behind The Scenes/, etc.)
+      // go at the movie root level — NOT inside an Extras/ subfolder.
+      // Plex, Jellyfin, and Kodi all expect: Movies/Title (Year)/Featurettes/file.mkv
       const extrasOutputFiles: string[] = []
-      if (trackMetaList && trackMetaList.length > 1 && extractResult.outputFiles.length > 1) {
+      if (trackMetaList && trackMetaList.length > 0 && extractResult.outputFiles.length > 0) {
         const extrasEntries = trackMetaList
           .map((meta, i) => ({ meta, file: extractResult.outputFiles[i] }))
-          .filter((_, i) => i !== mainFileIndex)
+          .filter((_, i) => i !== mainFileIndex || skipMainEncode)
 
         for (let ei = 0; ei < extrasEntries.length; ei++) {
           const { meta: extraMeta, file: extrasFile } = extrasEntries[ei]
+          if (extraMeta.category === 'main') continue // Already encoded above
           const categoryFolder = EXTRAS_FOLDER_MAP[extraMeta.category] || 'Other'
-          const extrasDir = join(libraryOutputDir, categoryFolder)
+          const extrasDir = join(movieRootDir, categoryFolder)
           mkdirSync(extrasDir, { recursive: true })
 
           // Sanitize filename
@@ -593,7 +622,7 @@ export class JobQueueService {
           fanart: fanartLocalPath
         },
         edition: opts?.edition,
-        isExtrasDisc: opts?.isExtrasDisc,
+        isExtrasDisc: useExtrasDiscMode,
         setName: opts?.setName,
         setOverview: opts?.setOverview,
         discNumber: opts?.discNumber,
@@ -601,36 +630,49 @@ export class JobQueueService {
         soundVersion: opts?.soundVersion
       }
 
-      this.kodiService.finalizeMovie(finalizeParams)
-      log.info(`[media-lib] Primary library organized: ${primaryLibraryPath}`)
+      if (!skipMainEncode) {
+        this.kodiService.finalizeMovie(finalizeParams)
+        log.info(`[media-lib] Primary library organized: ${primaryLibraryPath}`)
+      }
 
       // ── Copy to additional libraries (Jellyfin + Plex + Kodi multi-output) ──
       if (params.additionalLibraryPaths && params.additionalLibraryPaths.length > 0) {
         sendProgress(95, `Step 3/3 — Copying to ${params.additionalLibraryPaths.length} additional librar${params.additionalLibraryPaths.length > 1 ? 'ies' : 'y'}...`)
         for (const additionalPath of params.additionalLibraryPaths) {
           try {
-            const { videoPath: additionalVideoPath, outputDir: additionalDir } =
-              this.kodiService.buildMoviePath({
-                libraryPath: additionalPath,
-                title: movieTitle,
-                year: movieYear,
-                edition: opts?.edition,
-                soundVersion: opts?.soundVersion,
-                discNumber: opts?.discNumber,
-                totalDiscs: opts?.totalDiscs,
-                isExtrasDisc: opts?.isExtrasDisc
-              })
-            mkdirSync(additionalDir, { recursive: true })
-            copyFileSync(finalVideoPath, additionalVideoPath)
-            this.kodiService.finalizeMovie({
-              ...finalizeParams,
+            const { outputDir: additionalMovieRoot } = this.kodiService.buildMoviePath({
               libraryPath: additionalPath,
-              videoAlreadyAtPath: additionalVideoPath
+              title: movieTitle,
+              year: movieYear
             })
+            mkdirSync(additionalMovieRoot, { recursive: true })
+
+            // Copy main feature if applicable
+            if (!skipMainEncode) {
+              const { videoPath: additionalVideoPath } =
+                this.kodiService.buildMoviePath({
+                  libraryPath: additionalPath,
+                  title: movieTitle,
+                  year: movieYear,
+                  edition: opts?.edition,
+                  soundVersion: opts?.soundVersion,
+                  discNumber: opts?.discNumber,
+                  totalDiscs: opts?.totalDiscs,
+                  isExtrasDisc: useExtrasDiscMode
+                })
+              mkdirSync(dirname(additionalVideoPath), { recursive: true })
+              copyFileSync(finalVideoPath, additionalVideoPath)
+              this.kodiService.finalizeMovie({
+                ...finalizeParams,
+                libraryPath: additionalPath,
+                videoAlreadyAtPath: additionalVideoPath
+              })
+            }
+
             // Copy extras subfolders to additional library
             for (const extrasFile of extrasOutputFiles) {
-              const relPath = extrasFile.slice(libraryOutputDir.length)
-              const destPath = join(additionalDir, relPath)
+              const relPath = extrasFile.slice(movieRootDir.length)
+              const destPath = join(additionalMovieRoot, relPath)
               mkdirSync(dirname(destPath), { recursive: true })
               copyFileSync(extrasFile, destPath)
             }
@@ -679,10 +721,11 @@ export class JobQueueService {
       phase = 'done'
       jobQueries.updateJobStatus(dbId, 'completed')
       this.updateQueueItem(jobId, 'completed')
-      window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: [finalVideoPath] })
-      notifyJobComplete(movieTitle, finalVideoPath).catch(() => {})
+      const allOutputFiles = skipMainEncode ? extrasOutputFiles : [finalVideoPath, ...extrasOutputFiles]
+      window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: allOutputFiles })
+      notifyJobComplete(movieTitle, allOutputFiles[0] || movieRootDir).catch(() => {})
 
-      log.info(`[media-lib] Pipeline complete — ${finalVideoPath}`)
+      log.info(`[media-lib] Pipeline complete — ${allOutputFiles.length} file(s) in ${movieRootDir}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       log.error(`[media-lib] Pipeline failed: ${msg}`)
