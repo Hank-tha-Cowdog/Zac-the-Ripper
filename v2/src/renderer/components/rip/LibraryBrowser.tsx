@@ -17,6 +17,8 @@ interface LibraryMovie {
   folderPath: string
   title: string
   year: number | null
+  tmdbId: number | null
+  imdbId: string | null
   setName: string | null
   setOverview: string | null
   editions: LibraryEdition[]
@@ -268,6 +270,9 @@ function MovieRow({ movie, indent, formatSize, onSelect }: {
           )}
           {movie.editions.some(e => e.nfoPath) && (
             <span className="flex items-center gap-0.5"><FileText className="w-2.5 h-2.5" /> nfo</span>
+          )}
+          {movie.tmdbId && (
+            <span className="flex items-center gap-0.5 text-purple-500">TMDB:{movie.tmdbId}</span>
           )}
         </div>
       </div>

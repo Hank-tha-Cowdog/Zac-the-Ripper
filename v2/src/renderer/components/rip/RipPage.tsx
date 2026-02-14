@@ -18,8 +18,8 @@ export function RipPage() {
   const [isRipping, setIsRipping] = useState(false)
   const [standbyMessage, setStandbyMessage] = useState<string | null>(null)
 
-  // One-shot scan + auto-load disc info if not already loaded from Dashboard
-  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: true })
+  // Manual rescan only — global disc detection in App.tsx handles polling + auto-load
+  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
 
   const {
     modes, setModes,
@@ -47,12 +47,49 @@ export function RipPage() {
     navigate('/')
   }
 
-  const handleLibrarySelect = (selection: LibrarySelection) => {
+  const handleLibrarySelect = async (selection: LibrarySelection) => {
     const { movie, setName, setOverview } = selection
     setKodiTitle(movie.title)
     if (movie.year) setKodiYear(String(movie.year))
     if (setName) setKodiSetName(setName)
     if (setOverview) setKodiSetOverview(setOverview)
+
+    // Auto-populate TMDB data from existing movie's NFO
+    if (movie.tmdbId) {
+      setKodiTmdbId(movie.tmdbId)
+      try {
+        const details = await window.ztr.tmdb.getDetails(movie.tmdbId, 'movie')
+        const year = movie.year ? String(movie.year) : ''
+        const tmdbResult = {
+          id: movie.tmdbId,
+          title: movie.title,
+          year,
+          poster_path: details?.poster_path || null,
+          overview: details?.overview || '',
+          vote_average: details?.vote_average || 0,
+          belongs_to_collection: details?.belongs_to_collection || null
+        }
+        setTmdbResult(tmdbResult)
+        updateDiscSession({
+          kodiTitle: movie.title,
+          kodiYear: year,
+          kodiTmdbId: movie.tmdbId,
+          sessionDiscId: discInfo?.discId ?? '__user_pending__'
+        })
+
+        // Auto-populate collection from TMDB if NFO didn't have it
+        if (details?.belongs_to_collection?.name && !setName) {
+          setKodiSetName(details.belongs_to_collection.name)
+        }
+
+        // Cache TMDB result for disc recognition
+        if (discInfo?.discId) {
+          window.ztr.disc.setTmdbCache(discInfo.discId, tmdbResult).catch(() => {})
+        }
+      } catch (err) {
+        console.warn('Failed to fetch TMDB details for library movie:', err)
+      }
+    }
   }
 
   const handleRip = async () => {

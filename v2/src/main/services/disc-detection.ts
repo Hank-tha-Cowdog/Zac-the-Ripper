@@ -64,6 +64,18 @@ export class DiscDetectionService {
   // to prevent MakeMKV concurrent access failures
   private fullScanInProgress = false
   private lastDrives: DriveInfo[] = []
+  // In-flight guard: deduplicate concurrent scanDrives() calls
+  private scanInFlight: Promise<DriveInfo[]> | null = null
+  // Ripping guard: when a MakeMKV rip/backup is active, skip disc polling
+  private _rippingInProgress = false
+
+  get rippingInProgress(): boolean {
+    return this._rippingInProgress
+  }
+  set rippingInProgress(value: boolean) {
+    this._rippingInProgress = value
+    log.info(`rippingInProgress = ${value}`)
+  }
 
   private getMakeMKVPath(): string | null {
     const settingPath = getSetting('tools.makemkvcon_path')
@@ -76,12 +88,28 @@ export class DiscDetectionService {
   }
 
   async scanDrives(): Promise<DriveInfo[]> {
-    // If a full disc scan is in progress, return cached drives to avoid
+    // If a full disc scan or rip is in progress, return cached drives to avoid
     // MakeMKV concurrent access failures (only one instance can run at a time)
-    if (this.fullScanInProgress) {
-      log.debug('scanDrives: skipped — full disc scan in progress, returning cached drives')
+    if (this.fullScanInProgress || this._rippingInProgress) {
+      log.debug(`scanDrives: skipped — ${this.fullScanInProgress ? 'full disc scan' : 'rip'} in progress, returning cached drives`)
       return this.lastDrives
     }
+
+    // Deduplicate concurrent calls: if a scan is already in flight, piggyback on it
+    if (this.scanInFlight) {
+      log.debug('scanDrives: scan already in flight, awaiting existing result')
+      return this.scanInFlight
+    }
+
+    this.scanInFlight = this._scanDrivesImpl()
+    try {
+      return await this.scanInFlight
+    } finally {
+      this.scanInFlight = null
+    }
+  }
+
+  private async _scanDrivesImpl(): Promise<DriveInfo[]> {
 
     // Get hardware drive list from MakeMKV (gives drive model name)
     // Then enrich with OS-level detection (gives disc title, device path, disc type)
@@ -586,4 +614,13 @@ export class DiscDetectionService {
       default: return num
     }
   }
+}
+
+// Singleton instance — shared across all IPC handlers
+let discDetectionInstance: DiscDetectionService | null = null
+export function getDiscDetectionService(): DiscDetectionService {
+  if (!discDetectionInstance) {
+    discDetectionInstance = new DiscDetectionService()
+  }
+  return discDetectionInstance
 }

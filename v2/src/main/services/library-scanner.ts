@@ -11,6 +11,8 @@ export interface LibraryMovie {
   folderPath: string
   title: string
   year: number | null
+  tmdbId: number | null
+  imdbId: string | null
   setName: string | null
   setOverview: string | null
   editions: LibraryEdition[]
@@ -142,17 +144,21 @@ export function scanMovieFolder(folderName: string, folderPath: string): Library
     const hasPoster = existsSync(join(folderPath, 'poster.jpg'))
     const hasFanart = existsSync(join(folderPath, 'fanart.jpg'))
 
-    // Parse set/collection name from any NFO file in the folder
+    // Parse metadata from NFO files (set/collection, TMDB/IMDB IDs)
     let setName: string | null = null
     let setOverview: string | null = null
+    let tmdbId: number | null = null
+    let imdbId: string | null = null
     for (const edition of editions) {
       if (edition.nfoPath) {
-        const nfoData = parseNFOSetInfo(edition.nfoPath)
-        if (nfoData.setName) {
+        const nfoData = parseNFOInfo(edition.nfoPath)
+        if (nfoData.setName && !setName) {
           setName = nfoData.setName
           setOverview = nfoData.setOverview
-          break
         }
+        if (nfoData.tmdbId && !tmdbId) tmdbId = nfoData.tmdbId
+        if (nfoData.imdbId && !imdbId) imdbId = nfoData.imdbId
+        if (setName && tmdbId && imdbId) break
       }
     }
 
@@ -161,6 +167,8 @@ export function scanMovieFolder(folderName: string, folderPath: string): Library
       folderPath,
       title,
       year,
+      tmdbId,
+      imdbId,
       setName,
       setOverview,
       editions,
@@ -173,22 +181,46 @@ export function scanMovieFolder(folderName: string, folderPath: string): Library
   }
 }
 
-function parseNFOSetInfo(nfoPath: string): { setName: string | null; setOverview: string | null } {
+interface NFOParsedInfo {
+  setName: string | null
+  setOverview: string | null
+  tmdbId: number | null
+  imdbId: string | null
+}
+
+function parseNFOInfo(nfoPath: string): NFOParsedInfo {
+  const empty: NFOParsedInfo = { setName: null, setOverview: null, tmdbId: null, imdbId: null }
   try {
     const content = readFileSync(nfoPath, 'utf-8')
+
+    let setName: string | null = null
+    let setOverview: string | null = null
+    let tmdbId: number | null = null
+    let imdbId: string | null = null
 
     // Parse <set><name>...</name></set>
     const setMatch = content.match(/<set>\s*<name>(.*?)<\/name>(?:\s*<overview>(.*?)<\/overview>)?\s*<\/set>/s)
     if (setMatch) {
-      return {
-        setName: unescapeXml(setMatch[1].trim()),
-        setOverview: setMatch[2] ? unescapeXml(setMatch[2].trim()) : null
-      }
+      setName = unescapeXml(setMatch[1].trim())
+      setOverview = setMatch[2] ? unescapeXml(setMatch[2].trim()) : null
     }
 
-    return { setName: null, setOverview: null }
+    // Parse <uniqueid type="tmdb">123</uniqueid>
+    const tmdbMatch = content.match(/<uniqueid\s+type="tmdb"[^>]*>(.*?)<\/uniqueid>/)
+    if (tmdbMatch) {
+      const parsed = parseInt(tmdbMatch[1].trim())
+      if (!isNaN(parsed)) tmdbId = parsed
+    }
+
+    // Parse <uniqueid type="imdb">tt0046672</uniqueid>
+    const imdbMatch = content.match(/<uniqueid\s+type="imdb"[^>]*>(.*?)<\/uniqueid>/)
+    if (imdbMatch) {
+      imdbId = imdbMatch[1].trim() || null
+    }
+
+    return { setName, setOverview, tmdbId, imdbId }
   } catch {
-    return { setName: null, setOverview: null }
+    return empty
   }
 }
 

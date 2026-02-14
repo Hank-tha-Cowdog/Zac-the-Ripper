@@ -24,7 +24,11 @@ async function getToolVersion(name: string, path: string): Promise<string | null
         break
       case 'ffmpeg':
       case 'ffprobe':
+      case 'ffplay':
         args = ['-version']
+        break
+      case 'mpv':
+        args = ['--version']
         break
       default:
         args = ['--version']
@@ -46,7 +50,7 @@ async function getToolVersion(name: string, path: string): Promise<string | null
       }
     }
 
-    if (name === 'ffmpeg' || name === 'ffprobe') {
+    if (name === 'ffmpeg' || name === 'ffprobe' || name === 'ffplay') {
       const match = stdout.match(/version\s+([\d.]+)/)
       return match ? match[1] : stdout.split('\n')[0]
     }
@@ -54,6 +58,12 @@ async function getToolVersion(name: string, path: string): Promise<string | null
     // makemkvcon: parse version from MSG line like MSG:1005,0,1,"MakeMKV v1.18.3..."
     if (name === 'makemkvcon') {
       const versionMatch = stdout.match(/MakeMKV v([\d.]+)/)
+      if (versionMatch) return versionMatch[1]
+    }
+
+    // mpv: version line like "mpv 0.37.0"
+    if (name === 'mpv') {
+      const versionMatch = stdout.match(/mpv\s+([\d.]+)/)
       if (versionMatch) return versionMatch[1]
     }
 
@@ -65,7 +75,7 @@ async function getToolVersion(name: string, path: string): Promise<string | null
 }
 
 export async function checkTools(): Promise<ToolStatus[]> {
-  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe']
+  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay']
   const results: ToolStatus[] = []
 
   for (const tool of tools) {

@@ -17,6 +17,7 @@ import { getEncodingArgs } from '../encoding-presets'
 import { createLogger } from '../util/logger'
 import { IPC } from '../../shared/ipc-channels'
 import { notifyJobComplete, notifyJobFailed } from './notify'
+import { getDiscDetectionService } from './disc-detection'
 
 const log = createLogger('job-queue')
 
@@ -69,7 +70,7 @@ export class JobQueueService {
     const outputDir = expandPath(params.outputDir)
 
     // Create disc record
-    const discInfo = await new (await import('./disc-detection')).DiscDetectionService().getDiscInfo(discIndex)
+    const discInfo = await getDiscDetectionService().getDiscInfo(discIndex)
     const disc = discQueries.createDisc({
       title: discInfo?.title || `Disc ${discIndex}`,
       disc_type: discInfo?.discType || 'DVD',
@@ -98,13 +99,14 @@ export class JobQueueService {
       const primaryPath = libraryTargets[0].path
       const additionalPaths = libraryTargets.slice(1).map(t => t.path).filter(Boolean)
 
-      // Use jellyfin_export or kodi_export as DB job type (plex uses jellyfin_export since format is identical)
-      const dbJobType = (primaryType === 'kodi_export' ? 'kodi_export' : 'jellyfin_export') as 'kodi_export' | 'jellyfin_export'
+      const dbJobType = primaryType as 'kodi_export' | 'jellyfin_export' | 'plex_export'
+      const kodiOpts = params.kodiOptions as { title?: string } | undefined
 
       const job = jobQueries.createJob({
         disc_id: disc.id,
         job_type: dbJobType,
-        output_path: primaryPath || outputDir
+        output_path: primaryPath || outputDir,
+        movie_title: kodiOpts?.title || null
       })
 
       const jobId = randomUUID()
@@ -135,12 +137,16 @@ export class JobQueueService {
       return { jobId, dbId: job.id }
     }
 
+    // Extract user-entered title for all job types
+    const kodiOpts = params.kodiOptions as { title?: string } | undefined
+
     // Create MKV rip job if mkv_rip mode is enabled
     if (modes.includes('mkv_rip')) {
       const mkvJob = jobQueries.createJob({
         disc_id: disc.id,
         job_type: 'mkv_rip',
-        output_path: outputDir
+        output_path: outputDir,
+        movie_title: kodiOpts?.title || null
       })
 
       const jobId = randomUUID()
@@ -168,7 +174,8 @@ export class JobQueueService {
       const rawJob = jobQueries.createJob({
         disc_id: disc.id,
         job_type: 'raw_capture',
-        output_path: outputDir
+        output_path: outputDir,
+        movie_title: kodiOpts?.title || null
       })
 
       const jobId = randomUUID()
@@ -229,6 +236,7 @@ export class JobQueueService {
 
     jobQueries.updateJobStatus(dbId, 'running')
     this.updateQueueItem(jobId, 'running')
+    getDiscDetectionService().rippingInProgress = true
 
     try {
       const result = await makemkvService.ripTitles({
@@ -295,6 +303,8 @@ export class JobQueueService {
       this.updateQueueItem(jobId, 'failed')
       window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
       notifyJobFailed('MKV Rip', msg).catch(() => {})
+    } finally {
+      getDiscDetectionService().rippingInProgress = false
     }
   }
 
@@ -433,6 +443,7 @@ export class JobQueueService {
       sendProgress(0, 'Step 1/3 — Starting disc extraction...')
 
       log.info(`[media-lib] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
+      getDiscDetectionService().rippingInProgress = true
 
       const extractResult = await makemkvService.ripTitles({
         jobId,
@@ -449,6 +460,8 @@ export class JobQueueService {
           }
         }
       })
+
+      getDiscDetectionService().rippingInProgress = false
 
       if (!extractResult.success || extractResult.outputFiles.length === 0) {
         throw new Error(extractResult.error || 'MKV extraction produced no files')
@@ -729,6 +742,7 @@ export class JobQueueService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       log.error(`[media-lib] Pipeline failed: ${msg}`)
+      getDiscDetectionService().rippingInProgress = false
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
       window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
@@ -749,6 +763,7 @@ export class JobQueueService {
 
     jobQueries.updateJobStatus(dbId, 'running')
     this.updateQueueItem(jobId, 'running')
+    getDiscDetectionService().rippingInProgress = true
 
     try {
       const result = await makemkvService.backup({ jobId, discIndex, outputDir, window })
@@ -766,6 +781,8 @@ export class JobQueueService {
       const msg = err instanceof Error ? err.message : String(err)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
+    } finally {
+      getDiscDetectionService().rippingInProgress = false
     }
   }
 

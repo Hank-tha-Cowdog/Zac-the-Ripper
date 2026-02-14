@@ -11,6 +11,7 @@ import { MakeMKVSetupScreen } from './components/setup/MakeMKVSetupScreen'
 import { useAppStore } from './stores/app-store'
 import { useJobProgress } from './hooks/useJobProgress'
 import { useTerminalLogs } from './hooks/useTerminalLogs'
+import { useDiscDetection } from './hooks/useDiscDetection'
 
 function App() {
   const { setInitialized, setSettings, setToolStatuses, toolStatuses } = useAppStore()
@@ -21,6 +22,11 @@ function App() {
 
   // Forward main process logs to terminal panel
   useTerminalLogs()
+
+  // ── Global disc detection ────────────────────────────────────
+  // Polls for drives every 5s, auto-loads disc info + TMDB when a disc is inserted.
+  // Runs here (App never unmounts) so it works regardless of which page is active.
+  useDiscDetection({ pollInterval: 5000, autoLoadDiscInfo: true })
 
   // Initialize app on mount
   useEffect(() => {

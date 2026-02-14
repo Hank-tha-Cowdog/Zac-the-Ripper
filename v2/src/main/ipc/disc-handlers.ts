@@ -2,14 +2,12 @@ import { ipcMain } from 'electron'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { IPC } from '../../shared/ipc-channels'
-import { DiscDetectionService } from '../services/disc-detection'
-import { MakeMKVService } from '../services/makemkv'
+import { getDiscDetectionService } from '../services/disc-detection'
 import * as discQueries from '../database/queries/discs'
 
 const execFileAsync = promisify(execFile)
 
-const discService = new DiscDetectionService()
-const makemkvService = new MakeMKVService()
+const discService = getDiscDetectionService()
 
 export function registerDiscHandlers(): void {
   ipcMain.handle(IPC.DISC_SCAN, async () => {
@@ -74,21 +72,6 @@ export function registerDiscHandlers(): void {
       console.warn('[disc-handlers] Failed to save TMDB cache:', err)
       return false
     }
-  })
-
-  ipcMain.handle(IPC.DISC_STREAM_START, async (_event, discIndex: number) => {
-    try {
-      return await makemkvService.startStream(discIndex)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn('[disc-handlers] Stream start failed:', msg)
-      return { port: 0, error: msg }
-    }
-  })
-
-  ipcMain.handle(IPC.DISC_STREAM_STOP, async () => {
-    makemkvService.stopStream()
-    return { success: true }
   })
 
   ipcMain.handle(IPC.DISC_EJECT, async (_event, driveIndex: number) => {

@@ -11,9 +11,21 @@ const api = {
     getInfo: (discIndex: number) => ipcRenderer.invoke(IPC.DISC_INFO, discIndex),
     getInfoCached: (discId: string) => ipcRenderer.invoke(IPC.DISC_INFO_CACHED, discId),
     setTmdbCache: (discId: string, tmdbResult: unknown) => ipcRenderer.invoke(IPC.DISC_TMDB_CACHE_SET, discId, tmdbResult),
-    eject: (driveIndex: number) => ipcRenderer.invoke(IPC.DISC_EJECT, driveIndex),
-    startStream: (discIndex: number) => ipcRenderer.invoke(IPC.DISC_STREAM_START, discIndex),
-    stopStream: () => ipcRenderer.invoke(IPC.DISC_STREAM_STOP)
+    eject: (driveIndex: number) => ipcRenderer.invoke(IPC.DISC_EJECT, driveIndex)
+  },
+
+  // Preview (mpv/ffplay)
+  preview: {
+    check: () => ipcRenderer.invoke(IPC.PREVIEW_CHECK),
+    start: (discIndex: number, titleIndex: number) => ipcRenderer.invoke(IPC.PREVIEW_START, discIndex, titleIndex),
+    stop: () => ipcRenderer.invoke(IPC.PREVIEW_STOP),
+    command: (cmd: string, ...args: unknown[]) => ipcRenderer.invoke(IPC.PREVIEW_COMMAND, cmd, ...args),
+    getState: () => ipcRenderer.invoke(IPC.PREVIEW_STATE),
+    onStateUpdate: (cb: (state: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: unknown) => cb(state)
+      ipcRenderer.on(IPC.PREVIEW_STATE_UPDATE, handler)
+      return () => ipcRenderer.removeListener(IPC.PREVIEW_STATE_UPDATE, handler)
+    }
   },
 
   // Rip operations

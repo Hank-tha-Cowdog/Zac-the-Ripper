@@ -10,6 +10,7 @@ export interface JobRow {
   output_path: string | null
   encoding_preset: string | null
   error_message: string | null
+  movie_title: string | null
   started_at: string | null
   completed_at: string | null
   duration_seconds: number | null
@@ -50,16 +51,18 @@ export function createJob(data: {
   input_path?: string
   output_path?: string
   encoding_preset?: string
+  movie_title?: string
 }): JobRow {
   const result = getDb().prepare(`
-    INSERT INTO jobs (disc_id, job_type, status, input_path, output_path, encoding_preset)
-    VALUES (?, ?, 'pending', ?, ?, ?)
+    INSERT INTO jobs (disc_id, job_type, status, input_path, output_path, encoding_preset, movie_title)
+    VALUES (?, ?, 'pending', ?, ?, ?, ?)
   `).run(
     data.disc_id ?? null,
     data.job_type,
     data.input_path ?? null,
     data.output_path ?? null,
-    data.encoding_preset ?? null
+    data.encoding_preset ?? null,
+    data.movie_title ?? null
   )
 
   return getJob(Number(result.lastInsertRowid))!

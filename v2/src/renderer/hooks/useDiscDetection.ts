@@ -19,7 +19,8 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
 
   const { setDrives, setScanning } = useDiscStore()
   const intervalRef = useRef<ReturnType<typeof setInterval>>()
-  const autoLoadAttempted = useRef(false)
+  // Track which disc we've auto-loaded (by discTitle) so we re-trigger for new discs
+  const autoLoadedDiscTitle = useRef<string | null>(null)
 
   const scan = useCallback(async () => {
     setScanning(true)
@@ -201,37 +202,48 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
     setLoading(false)
   }, [autoSearchTmdb])
 
-  // Auto-load disc info when a drive with disc is first detected
-  useEffect(() => {
-    if (!autoLoad || autoLoadAttempted.current) return
+  // Helper: check if we should auto-load for the current drive state
+  const tryAutoLoad = useCallback(() => {
     const { discInfo, loading, drives } = useDiscStore.getState()
-    if (discInfo || loading) return
+    if (loading) return
 
     const driveWithDisc = drives.find((d) => d.discTitle || d.discType)
-    if (driveWithDisc) {
-      autoLoadAttempted.current = true
-      console.log(`[useDiscDetection] Auto-loading disc info for drive ${driveWithDisc.index}`)
-      loadDiscInfo(driveWithDisc.index)
+    if (!driveWithDisc) {
+      // Disc was ejected — reset so we auto-load again when a new disc appears
+      if (autoLoadedDiscTitle.current !== null) {
+        console.log('[useDiscDetection] Disc ejected — resetting auto-load tracker')
+        autoLoadedDiscTitle.current = null
+      }
+      return
     }
-  })
 
-  // Subscribe to store changes to detect when drives become available
+    const currentDiscTitle = driveWithDisc.discTitle || driveWithDisc.discType || '__unknown__'
+
+    // Skip if we already auto-loaded this exact disc
+    if (autoLoadedDiscTitle.current === currentDiscTitle) return
+
+    // Skip if discInfo is already loaded for this disc (e.g. loaded by another hook instance)
+    if (discInfo && discInfo.discId === currentDiscTitle) return
+
+    autoLoadedDiscTitle.current = currentDiscTitle
+    console.log(`[useDiscDetection] Auto-loading disc info for drive ${driveWithDisc.index} (disc="${currentDiscTitle}")`)
+    loadDiscInfo(driveWithDisc.index)
+  }, [loadDiscInfo])
+
+  // Auto-load disc info when a drive with disc is first detected
   useEffect(() => {
     if (!autoLoad) return
-    const unsub = useDiscStore.subscribe((state) => {
-      if (autoLoadAttempted.current) return
-      const { discInfo, loading, drives } = state
-      if (discInfo || loading) return
+    tryAutoLoad()
+  })
 
-      const driveWithDisc = drives.find((d) => d.discTitle || d.discType)
-      if (driveWithDisc) {
-        autoLoadAttempted.current = true
-        console.log(`[useDiscDetection] Auto-loading disc info (subscription) for drive ${driveWithDisc.index}`)
-        loadDiscInfo(driveWithDisc.index)
-      }
+  // Subscribe to store changes to detect when drives become available or disc changes
+  useEffect(() => {
+    if (!autoLoad) return
+    const unsub = useDiscStore.subscribe(() => {
+      tryAutoLoad()
     })
     return unsub
-  }, [autoLoad, loadDiscInfo])
+  }, [autoLoad, tryAutoLoad])
 
   // Polling: do an initial scan, then optionally set up interval.
   // Singleton guard: only the FIRST hook instance with pollInterval>0 creates the interval.
@@ -258,7 +270,7 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
   const rescanDisc = useCallback(async (forceRefresh = false) => {
     const { drives, selectedDrive } = useDiscStore.getState()
     const driveIndex = selectedDrive ?? drives.find(d => d.discTitle || d.discType)?.index ?? 0
-    autoLoadAttempted.current = false
+    autoLoadedDiscTitle.current = null // Reset so auto-load can re-trigger
     console.log(`[useDiscDetection] Manual rescan triggered for drive ${driveIndex} (forceRefresh=${forceRefresh})`)
     await loadDiscInfo(driveIndex, forceRefresh)
   }, [loadDiscInfo])

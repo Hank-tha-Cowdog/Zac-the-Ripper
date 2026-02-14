@@ -316,6 +316,35 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.disc_number', '', 'rip');
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('rip.total_discs', '', 'rip');
       `
+    },
+    {
+      name: '018_add_plex_export_and_movie_title',
+      sql: `
+        DROP TABLE IF EXISTS jobs_new;
+        CREATE TABLE jobs_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          disc_id INTEGER REFERENCES discs(id),
+          job_type TEXT NOT NULL CHECK(job_type IN ('mkv_rip', 'raw_capture', 'ffv1_encode', 'h264_encode', 'hevc_encode', 'kodi_export', 'jellyfin_export', 'plex_export')),
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+          progress REAL DEFAULT 0,
+          input_path TEXT,
+          output_path TEXT,
+          encoding_preset TEXT,
+          error_message TEXT,
+          movie_title TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          duration_seconds REAL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO jobs_new (id, disc_id, job_type, status, progress, input_path, output_path, encoding_preset, error_message, movie_title, started_at, completed_at, duration_seconds, created_at, updated_at)
+          SELECT id, disc_id, job_type, status, progress, input_path, output_path, encoding_preset, error_message, NULL, started_at, completed_at, duration_seconds, created_at, updated_at FROM jobs;
+        DROP TABLE jobs;
+        ALTER TABLE jobs_new RENAME TO jobs;
+        CREATE INDEX IF NOT EXISTS idx_jobs_disc ON jobs(disc_id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+      `
     }
   ]
 }

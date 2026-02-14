@@ -28,7 +28,7 @@ function getFFV1Args(context: EncodingContext): string[] {
   const is10bit = video && (video.bitDepth > 8 || video.isHDR)
   const pixFmt = is10bit ? 'yuv420p10le' : 'yuv420p'
 
-  return [
+  const args = [
     // Video: FFV1 lossless
     '-c:v', 'ffv1',
     '-level', '3',
@@ -44,10 +44,21 @@ function getFFV1Args(context: EncodingContext): string[] {
     // Map all streams + preserve all metadata and chapters
     '-map', '0', '-map_metadata', '0', '-map_chapters', '0'
   ]
+
+  // Bug 4 fix: Preserve source color metadata in container for FFV1
+  // FFV1 is lossless so pixels are correct, but downstream tools need color tags
+  if (video) {
+    if (video.colorSpace) args.push('-colorspace', video.colorSpace)
+    if (video.colorTransfer) args.push('-color_trc', video.colorTransfer)
+    if (video.colorPrimaries) args.push('-color_primaries', video.colorPrimaries)
+    if (video.colorRange) args.push('-color_range', video.colorRange)
+  }
+
+  return args
 }
 
 function getH264Args(context: EncodingContext): string[] {
-  const { mediaInfo } = context
+  const { mediaInfo, preserveInterlaced } = context
   const video = mediaInfo.videoStreams[0]
 
   const crf = getSetting('encoding.h264_crf') || '18'
@@ -59,10 +70,21 @@ function getH264Args(context: EncodingContext): string[] {
   const args: string[] = []
   const vfFilters: string[] = []
 
-  // SD color space conversion: rec601 → rec709 for modern playback compatibility
+  // SD color space conversion: rec601 -> rec709 for modern playback compatibility
+  // Bug 1 fix: DVDs are always BT.601. When colorSpace is empty/unknown, still convert.
   const isSD = video && video.width <= 720
-  if (isSD && video.colorSpace && video.colorSpace !== 'bt709') {
-    const iall = video.colorPrimaries === 'bt470bg' ? 'bt601-6-625' : 'bt601-6-525'
+  const isSDColorConvertNeeded = isSD && video.colorSpace !== 'bt709'
+
+  if (isSDColorConvertNeeded) {
+    // Bug 3 fix: Interlaced content needs deinterlacing before colorspace filter
+    // to avoid combing artifacts from field-as-frame processing
+    if (video?.isInterlaced && !preserveInterlaced) {
+      vfFilters.push('yadif=mode=0')
+    }
+
+    const iall = video.colorPrimaries === 'bt470bg'
+      ? 'bt601-6-625'    // PAL
+      : 'bt601-6-525'    // NTSC (default for empty/smpte170m)
     vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
   }
 
@@ -85,7 +107,9 @@ function getH264Args(context: EncodingContext): string[] {
   }
 
   // Preserve interlaced flags if source is interlaced (no deinterlacing)
-  if (video?.isInterlaced) {
+  // Bug 3: Skip interlaced flags if we already deinterlaced for colorspace conversion
+  const deinterlacedForColor = isSDColorConvertNeeded && video?.isInterlaced && !preserveInterlaced
+  if (video?.isInterlaced && !deinterlacedForColor) {
     args.push('-flags', '+ilme+ildct', '-top', '1')
   }
 
@@ -145,6 +169,15 @@ function getH264Args(context: EncodingContext): string[] {
       break
   }
 
+  // Bug 2 fix: HW encoders don't auto-tag output color metadata after colorspace conversion
+  if (isSDColorConvertNeeded && hwAccel !== 'software') {
+    args.push(
+      '-color_primaries', 'bt709',
+      '-color_trc', 'bt709',
+      '-colorspace', 'bt709'
+    )
+  }
+
   // Audio: passthrough (preserve original AC3/DTS/TrueHD)
   args.push('-c:a', 'copy')
 
@@ -158,7 +191,7 @@ function getH264Args(context: EncodingContext): string[] {
 }
 
 function getHEVCArgs(context: EncodingContext): string[] {
-  const { mediaInfo } = context
+  const { mediaInfo, preserveInterlaced } = context
   const video = mediaInfo.videoStreams[0]
 
   const quality = getSetting('encoding.hevc_quality') || '65'
@@ -172,10 +205,20 @@ function getHEVCArgs(context: EncodingContext): string[] {
   const is10bit = video && (video.bitDepth > 8 || video.isHDR)
   const profileName = is10bit ? 'main10' : 'main'
 
-  // SD color space conversion: rec601 → rec709 for modern playback compatibility
+  // SD color space conversion: rec601 -> rec709 for modern playback compatibility
+  // Bug 1 fix: DVDs are always BT.601. When colorSpace is empty/unknown, still convert.
   const isSD = video && video.width <= 720
-  if (isSD && video.colorSpace && video.colorSpace !== 'bt709') {
-    const iall = video.colorPrimaries === 'bt470bg' ? 'bt601-6-625' : 'bt601-6-525'
+  const isSDColorConvertNeeded = isSD && video.colorSpace !== 'bt709'
+
+  if (isSDColorConvertNeeded) {
+    // Bug 3 fix: Interlaced content needs deinterlacing before colorspace filter
+    if (video?.isInterlaced && !preserveInterlaced) {
+      vfFilters.push('yadif=mode=0')
+    }
+
+    const iall = video.colorPrimaries === 'bt470bg'
+      ? 'bt601-6-625'    // PAL
+      : 'bt601-6-525'    // NTSC (default for empty/smpte170m)
     vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
   }
 
@@ -197,7 +240,9 @@ function getHEVCArgs(context: EncodingContext): string[] {
   }
 
   // Preserve interlaced flags if source is interlaced (no deinterlacing)
-  if (video?.isInterlaced) {
+  // Bug 3: Skip interlaced flags if we already deinterlaced for colorspace conversion
+  const deinterlacedForColor = isSDColorConvertNeeded && video?.isInterlaced && !preserveInterlaced
+  if (video?.isInterlaced && !deinterlacedForColor) {
     args.push('-flags', '+ilme+ildct', '-top', '1')
   }
 
@@ -257,6 +302,24 @@ function getHEVCArgs(context: EncodingContext): string[] {
         ].join(':'))
       }
       break
+  }
+
+  // Bug 2 fix: HW encoders don't auto-tag output color metadata after SD colorspace conversion
+  if (isSDColorConvertNeeded && hwAccel !== 'software') {
+    args.push(
+      '-color_primaries', 'bt709',
+      '-color_trc', 'bt709',
+      '-colorspace', 'bt709'
+    )
+  }
+
+  // Bug 5 fix: HW HEVC encoders lose HDR metadata (only libx265 sets it via -x265-params)
+  if (hwAccel !== 'software' && is10bit && video) {
+    args.push(
+      '-color_primaries', video.colorPrimaries || 'bt2020',
+      '-color_trc', video.colorTransfer || 'smpte2084',
+      '-colorspace', video.colorSpace || 'bt2020nc'
+    )
   }
 
   // Audio: passthrough (preserve original AC3/DTS/TrueHD)

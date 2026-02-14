@@ -11,7 +11,8 @@ import { TechLabel, Spinner } from '../ui'
 export function DashboardPage() {
   const navigate = useNavigate()
   const { drives, scanning, selectedDrive, tmdbResult, discInfo } = useDiscStore()
-  const { scan, loadDiscInfo } = useDiscDetection({ pollInterval: 5000, autoLoadDiscInfo: true })
+  // No polling here — global disc detection in App.tsx handles polling + auto-load
+  const { scan, loadDiscInfo } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
 
   const handleScan = (driveIndex: number) => {
     loadDiscInfo(driveIndex)

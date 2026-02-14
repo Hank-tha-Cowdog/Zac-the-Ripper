@@ -6,12 +6,24 @@ interface HistoryJob {
   id: number
   disc_id: number | null
   disc_title: string | null
+  movie_title: string | null
   job_type: string
   status: string
   output_path: string | null
   completed_at: string | null
   duration_seconds: number | null
   created_at: string
+}
+
+const TYPE_LABELS: Record<string, string> = {
+  mkv_rip: 'MKV Rip',
+  raw_capture: 'Raw',
+  ffv1_encode: 'FFV1',
+  h264_encode: 'H.264',
+  hevc_encode: 'HEVC',
+  kodi_export: 'Kodi',
+  jellyfin_export: 'Jellyfin',
+  plex_export: 'Plex'
 }
 
 interface HistoryTableProps {
@@ -89,6 +101,7 @@ export function HistoryTable({ onViewDetails }: HistoryTableProps) {
               <th className="label-tech text-left p-3">Status</th>
               <th className="label-tech text-left p-3">Date</th>
               <th className="label-tech text-left p-3">Disc</th>
+              <th className="label-tech text-left p-3">Title</th>
               <th className="label-tech text-left p-3">Type</th>
               <th className="label-tech text-left p-3">Output</th>
               <th className="label-tech text-left p-3">Duration</th>
@@ -106,8 +119,11 @@ export function HistoryTable({ onViewDetails }: HistoryTableProps) {
                 <td className="p-3 text-xs text-zinc-300 font-mono truncate max-w-40">
                   {job.disc_title || '--'}
                 </td>
+                <td className="p-3 text-xs text-zinc-300 truncate max-w-48">
+                  {job.movie_title || job.disc_title || '--'}
+                </td>
                 <td className="p-3">
-                  <Badge>{job.job_type.replace(/_/g, ' ')}</Badge>
+                  <Badge>{TYPE_LABELS[job.job_type] || job.job_type}</Badge>
                 </td>
                 <td className="p-3 text-xs text-zinc-400 font-mono truncate max-w-48">
                   {job.output_path?.split('/').pop() || '--'}
@@ -125,7 +141,7 @@ export function HistoryTable({ onViewDetails }: HistoryTableProps) {
 
             {jobs.length === 0 && (
               <tr>
-                <td colSpan={7} className="p-8 text-center text-sm text-zinc-600">
+                <td colSpan={8} className="p-8 text-center text-sm text-zinc-600">
                   No jobs found
                 </td>
               </tr>

@@ -46,19 +46,33 @@ export function getDefaultToolPaths(): Record<string, string[]> {
         ffprobe: [
           '/usr/local/bin/ffprobe',
           '/opt/homebrew/bin/ffprobe'
+        ],
+        mpv: [
+          '/opt/homebrew/bin/mpv',
+          '/usr/local/bin/mpv',
+          '/usr/bin/mpv'
+        ],
+        ffplay: [
+          '/opt/homebrew/bin/ffplay',
+          '/usr/local/bin/ffplay',
+          '/usr/bin/ffplay'
         ]
       }
     case 'linux':
       return {
         makemkvcon: ['/usr/bin/makemkvcon', '/usr/local/bin/makemkvcon'],
         ffmpeg: ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'],
-        ffprobe: ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe']
+        ffprobe: ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe'],
+        mpv: ['/usr/bin/mpv', '/usr/local/bin/mpv'],
+        ffplay: ['/usr/bin/ffplay', '/usr/local/bin/ffplay']
       }
     case 'windows':
       return {
         makemkvcon: ['C:\\Program Files (x86)\\MakeMKV\\makemkvcon64.exe'],
         ffmpeg: ['C:\\ffmpeg\\bin\\ffmpeg.exe'],
-        ffprobe: ['C:\\ffmpeg\\bin\\ffprobe.exe']
+        ffprobe: ['C:\\ffmpeg\\bin\\ffprobe.exe'],
+        mpv: ['C:\\Program Files\\mpv\\mpv.exe'],
+        ffplay: ['C:\\ffmpeg\\bin\\ffplay.exe']
       }
   }
 }

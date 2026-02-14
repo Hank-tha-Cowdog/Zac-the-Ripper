@@ -9,6 +9,7 @@ import { registerToolsHandlers } from './tools-handlers'
 import { registerAppHandlers } from './app-handlers'
 import { registerLibraryHandlers } from './library-handlers'
 import { registerNotifyHandlers } from './notify-handlers'
+import { registerPreviewHandlers } from './preview-handlers'
 
 export function registerAllIpcHandlers(): void {
   registerDiscHandlers()
@@ -22,4 +23,5 @@ export function registerAllIpcHandlers(): void {
   registerAppHandlers()
   registerLibraryHandlers()
   registerNotifyHandlers()
+  registerPreviewHandlers()
 }

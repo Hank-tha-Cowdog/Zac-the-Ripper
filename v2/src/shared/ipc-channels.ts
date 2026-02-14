@@ -8,8 +8,13 @@ export const IPC = {
   DISC_INFO_CACHED: 'disc:info-cached',
   DISC_TMDB_CACHE_SET: 'disc:tmdb-cache-set',
   DISC_EJECT: 'disc:eject',
-  DISC_STREAM_START: 'disc:stream-start',
-  DISC_STREAM_STOP: 'disc:stream-stop',
+  // Preview (mpv/ffplay)
+  PREVIEW_CHECK: 'preview:check',
+  PREVIEW_START: 'preview:start',
+  PREVIEW_STOP: 'preview:stop',
+  PREVIEW_COMMAND: 'preview:command',
+  PREVIEW_STATE: 'preview:state',
+  PREVIEW_STATE_UPDATE: 'preview:state-update',
 
   // Rip operations
   RIP_START: 'rip:start',

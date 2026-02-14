@@ -277,8 +277,56 @@ export class MakeMKVService {
   // ─── Streaming ──────────────────────────────────────────────────────
 
   private streamProcess: ChildProcess | null = null
+  private _streamSupported: boolean | null = null
+
+  /** Check if makemkvcon supports the 'stream' subcommand by parsing help output */
+  async checkStreamSupport(): Promise<boolean> {
+    if (this._streamSupported !== null) return this._streamSupported
+
+    const makemkvcon = this.getMakeMKVPath()
+    return new Promise((resolve) => {
+      // Run 'makemkvcon' with no args — it prints usage/help listing available commands
+      // Check if "stream" appears as a recognized command in the output
+      const proc = spawn(makemkvcon, [], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+
+      let stdout = ''
+      let stderr = ''
+      proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString() })
+      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString() })
+
+      const timeout = setTimeout(() => {
+        // If makemkvcon hangs for 15s on a bare invocation, assume no stream support (safe default)
+        proc.kill()
+        log.info('[stream] makemkvcon timed out on help check — assuming stream not supported')
+        this._streamSupported = false
+        resolve(false)
+      }, 15000)
+
+      proc.on('exit', () => {
+        clearTimeout(timeout)
+        const output = (stdout + '\n' + stderr).toLowerCase()
+        // Look for "stream" as a listed command in the help/usage output
+        const supported = output.includes('stream')
+        log.info(`[stream] makemkvcon stream support: ${supported}`)
+        this._streamSupported = supported
+        resolve(supported)
+      })
+    })
+  }
 
   async startStream(discIndex: number): Promise<{ port: number }> {
+    // Check if stream is supported first
+    const supported = await this.checkStreamSupport()
+    if (!supported) {
+      throw new Error(
+        'The "stream" command is not available in your version of makemkvcon. ' +
+        'Disc preview requires MakeMKV v1.17.8+ with streaming support. ' +
+        'You can use VLC to preview disc content instead.'
+      )
+    }
+
     // Stop any existing stream first, then wait for it to fully release the drive
     if (this.streamProcess) {
       this.stopStream()
