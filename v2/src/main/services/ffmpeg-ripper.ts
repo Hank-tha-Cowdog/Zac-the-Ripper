@@ -353,6 +353,21 @@ export class FFmpegRipperService {
     return new Promise((resolve) => {
       let lastSpeed: number | null = null
       const stderrLines: string[] = []
+      let lastActivityTime = Date.now()
+      let resolved = false
+
+      const STALL_TIMEOUT_MS = 180_000 // 3 minutes with no progress = stalled
+
+      const stallCheck = setInterval(() => {
+        const silentMs = Date.now() - lastActivityTime
+        if (silentMs >= STALL_TIMEOUT_MS && !resolved) {
+          log.error(`[ffmpeg-rip] Aborting ${jobId}: no progress for ${Math.round(silentMs / 1000)}s, process appears stalled`)
+          clearInterval(stallCheck)
+          proc.kill()
+        } else if (silentMs >= 30_000) {
+          log.info(`[ffmpeg-rip] ${jobId} health: silent for ${Math.round(silentMs / 1000)}s`)
+        }
+      }, 15_000)
 
       const proc = runProcess({
         command: ffmpeg,
@@ -362,6 +377,7 @@ export class FFmpegRipperService {
           if (line.startsWith('out_time_us=') || line.startsWith('out_time_ms=')) {
             const value = parseInt(line.split('=')[1])
             if (!isNaN(value) && expectedDuration > 0) {
+              lastActivityTime = Date.now()
               const currentSeconds = value / 1_000_000
               const pct = Math.min((currentSeconds / expectedDuration) * 100, 99.9)
               const speedStr = lastSpeed ? ` @ ${lastSpeed.toFixed(1)}x` : ''
@@ -369,6 +385,7 @@ export class FFmpegRipperService {
             }
           }
           if (line.includes('speed=')) {
+            lastActivityTime = Date.now()
             const m = line.match(/speed=\s*([\d.]+)x/)
             if (m) lastSpeed = parseFloat(m[1])
           }
@@ -378,11 +395,14 @@ export class FFmpegRipperService {
           stderrLines.push(line)
           // Also parse progress from stderr (ffmpeg sometimes reports there)
           if (line.includes('speed=')) {
+            lastActivityTime = Date.now()
             const m = line.match(/speed=\s*([\d.]+)x/)
             if (m) lastSpeed = parseFloat(m[1])
           }
         },
         onExit: (code) => {
+          resolved = true
+          clearInterval(stallCheck)
           this.activeProcesses.delete(jobId)
 
           if (code === 0) {
