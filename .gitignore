@@ -8,7 +8,11 @@ v2/build/
 
 # OS files
 .DS_Store
+._*
 Thumbs.db
+
+# Legacy v1 local output (not tracked)
+v1/
 
 # IDE
 .idea/
@@ -20,11 +24,9 @@ Thumbs.db
 .env
 .env.local
 
-# Python (v1)
-v1/__pycache__/
-v1/*.pyc
-v1/output/
-v1/venv/
+# Legacy Python scripts
+legacy/**/__pycache__/
+legacy/**/*.pyc
 
 # Electron
 v2/*.dmg
