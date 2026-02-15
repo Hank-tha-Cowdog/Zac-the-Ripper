@@ -58,8 +58,8 @@ Built for home media collectors who want a streamlined workflow from disc to lib
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/zac-the-ripper.git
-cd zac-the-ripper/v2
+git clone https://github.com/Hank-tha-Cowdog/Zac-the-Ripper.git
+cd Zac-the-Ripper/v2
 
 # Install dependencies
 npm install
@@ -229,10 +229,10 @@ Movies/
 
 ## MakeMKV Fallback System
 
-MakeMKV v1.18.3 has a known deadlock bug where the process hangs after "Using direct disc access mode" with 0% CPU usage. Zac the Ripper detects and recovers from this automatically:
+MakeMKV v1.18.3 has a known deadlock bug where the process hangs after "Using direct disc access mode" with 0% CPU usage. This can occur during both the disc-open phase and mid-rip. Zac the Ripper detects and recovers from this automatically:
 
-1. **Health monitoring** &mdash; Checks CPU usage every 15 seconds via `ps`
-2. **Deadlock detection** &mdash; Three consecutive 0% CPU readings + 60 seconds of silence triggers kill
+1. **Health monitoring** &mdash; Checks CPU usage every 15 seconds via `ps` whenever MakeMKV has been silent for 30+ seconds, regardless of rip phase
+2. **Deadlock detection** &mdash; Three consecutive 0% CPU readings (~45 seconds of silence) triggers kill
 3. **Stall timeout** &mdash; 5-minute absolute timeout as a safety net
 4. **FFmpeg fallback** &mdash; On DVD deadlock, automatically switches to VOB extraction:
    - Detects VIDEO_TS directory and VTS file structure
