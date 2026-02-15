@@ -542,8 +542,6 @@ export class JobQueueService {
         }
       })
 
-      getDiscDetectionService().rippingInProgress = false
-
       if (!extractResult.success || extractResult.outputFiles.length === 0) {
         // MakeMKV failed — try ffmpeg VOB fallback for DVDs
         if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
@@ -572,6 +570,9 @@ export class JobQueueService {
           throw new Error(extractResult.error || 'MKV extraction produced no files')
         }
       }
+
+      // Release disc polling guard after entire extraction phase (MakeMKV + potential FFmpeg fallback)
+      getDiscDetectionService().rippingInProgress = false
 
       log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted` +
         (extractResult.readErrors?.length ? `, ${extractResult.readErrors.length} read error(s)` : ''))
