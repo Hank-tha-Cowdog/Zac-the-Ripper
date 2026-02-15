@@ -324,9 +324,9 @@ export class MakeMKVService {
           return
         }
 
-        // CPU-based health check — only before first PRGV (during disc open phase)
-        // Once we've received actual rip progress, trust the stall timer instead
-        if (!gotFirstProgress && stalledMs >= 30000 && proc.pid > 0) {
+        // CPU-based health check — detect deadlocks when process is silent for 30s+
+        // Three consecutive 0% CPU readings (~45s) means true deadlock; counter resets on every PRGV
+        if (stalledMs >= 30000 && proc.pid > 0) {
           try {
             const { stdout } = await execAsync(`ps -p ${proc.pid} -o %cpu=,rss=,state=`)
             const parts = stdout.trim().split(/\s+/)
