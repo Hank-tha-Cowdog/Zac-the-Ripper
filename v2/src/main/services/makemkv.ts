@@ -2,8 +2,11 @@ import { BrowserWindow } from 'electron'
 import { readdirSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { spawn, type ChildProcess } from 'child_process'
+import { exec, spawn, type ChildProcess } from 'child_process'
+import { promisify } from 'util'
 import http from 'http'
+
+const execAsync = promisify(exec)
 import { runProcess, RunningProcess } from '../util/process-runner'
 import { getSetting } from '../database/queries/settings'
 import { findToolPath, getBundledBinPath } from '../util/platform'
@@ -143,12 +146,17 @@ export class MakeMKVService {
     // and report them after completion. Only abort if progress truly
     // stalls (process stuck) or the disc is extremely damaged.
     const MAX_TOTAL_ERRORS = 100       // Abort threshold for severely damaged discs
-    const PROGRESS_STALL_MS = 15 * 60 * 1000 // 15 min stall = truly stuck
+    const PROGRESS_STALL_MS = 5 * 60 * 1000  // 5 min no-output = stuck (safety net)
+    const HEALTH_CHECK_INTERVAL_MS = 15000    // Check process health every 15s
+    const ZERO_CPU_KILL_COUNT = 3             // Kill after 3 consecutive 0% CPU readings
+    const ZERO_CPU_SILENCE_GATE_MS = 60000    // AND at least 60s of no progress
 
     return new Promise((resolve) => {
       let failed = false
       let lastProgressTime = Date.now()
-      let stallTimer: ReturnType<typeof setInterval> | null = null
+      let healthTimer: ReturnType<typeof setInterval> | null = null
+      let consecutiveZeroCpu = 0
+      let gotFirstProgress = false  // Track if we've received any PRGV line
       const readErrors: ReadError[] = []
 
       const proc = runProcess({
@@ -173,6 +181,8 @@ export class MakeMKVService {
 
             // Any progress update means MakeMKV is still working
             lastProgressTime = Date.now()
+            gotFirstProgress = true
+            consecutiveZeroCpu = 0  // Reset — process is clearly alive
 
             const errorSuffix = readErrors.length > 0 ? ` (${readErrors.length} read errors)` : ''
             if (onProgress) {
@@ -248,7 +258,7 @@ export class MakeMKVService {
           log.debug(`MakeMKV stderr: ${line}`)
         },
         onExit: (code) => {
-          if (stallTimer) clearInterval(stallTimer)
+          if (healthTimer) clearInterval(healthTimer)
           this.activeProcesses.delete(jobId)
 
           // Log read error summary
@@ -297,16 +307,55 @@ export class MakeMKVService {
 
       this.activeProcesses.set(jobId, proc)
 
-      // Progress stall watchdog — kills the process only if truly stuck
-      // (no progress AND no error messages for 15 minutes)
-      stallTimer = setInterval(() => {
+      // Health watchdog — monitors both output stall AND CPU usage.
+      // A deadlocked MakeMKV (confirmed v1.18.3 bug) shows 0% CPU immediately
+      // after "Using direct disc access mode". A legitimate rip always has CPU
+      // activity from disc I/O and decryption. CPU monitoring detects deadlocks
+      // in ~60s; the stall timeout is a safety net for other failure modes.
+      healthTimer = setInterval(async () => {
         const stalledMs = Date.now() - lastProgressTime
+        const stalledSec = Math.round(stalledMs / 1000)
+
+        // Safety net: absolute stall timeout (no output at all for 5 min)
         if (stalledMs >= PROGRESS_STALL_MS) {
-          log.error(`[rip] Aborting: no activity for ${(stalledMs / 60000).toFixed(0)} minutes — process appears stuck`)
+          log.error(`[rip] Aborting title ${titleId}: no activity for ${(stalledMs / 60000).toFixed(0)} minutes — process appears stuck`)
           failed = true
           proc.kill()
+          return
         }
-      }, 30000) // Check every 30 seconds
+
+        // CPU-based health check — only before first PRGV (during disc open phase)
+        // Once we've received actual rip progress, trust the stall timer instead
+        if (!gotFirstProgress && stalledMs >= 30000 && proc.pid > 0) {
+          try {
+            const { stdout } = await execAsync(`ps -p ${proc.pid} -o %cpu=,rss=,state=`)
+            const parts = stdout.trim().split(/\s+/)
+            const cpu = parseFloat(parts[0] || '0')
+            const rssMb = Math.round(parseInt(parts[1] || '0', 10) / 1024)
+            const state = parts[2] || '?'
+
+            log.info(`[rip] Title ${titleId} health: pid=${proc.pid} cpu=${cpu}% mem=${rssMb}MB state=${state} silent=${stalledSec}s`)
+
+            if (cpu < 0.5) {
+              consecutiveZeroCpu++
+            } else {
+              consecutiveZeroCpu = 0
+            }
+
+            // Kill after N consecutive 0% CPU readings AND sufficient silence
+            if (consecutiveZeroCpu >= ZERO_CPU_KILL_COUNT && stalledMs >= ZERO_CPU_SILENCE_GATE_MS) {
+              log.error(`[rip] Aborting title ${titleId}: process appears deadlocked (0% CPU for ${consecutiveZeroCpu * (HEALTH_CHECK_INTERVAL_MS / 1000)}s, silent for ${stalledSec}s)`)
+              failed = true
+              proc.kill()
+              return
+            }
+          } catch {
+            log.warn(`[rip] Could not check process health for title ${titleId} (pid=${proc.pid}, may have exited)`)
+          }
+        } else if (stalledMs >= 60000) {
+          log.info(`[rip] Title ${titleId}: waiting for MakeMKV (silent for ${stalledSec}s, gotProgress=${gotFirstProgress})`)
+        }
+      }, HEALTH_CHECK_INTERVAL_MS)
     })
   }
 
