@@ -238,7 +238,9 @@ MakeMKV v1.18.3 has a known deadlock bug where the process hangs after "Using di
    - Detects VIDEO_TS directory and VTS file structure
    - Maps selected titles to their VTS files (via lsdvd or duration heuristic)
    - Concatenates VOB files with FFmpeg concat protocol
+   - Own stall detection: 3-minute timeout if FFmpeg stops producing progress (e.g., disc I/O hang)
    - Post-rip validation (stream check + duration tolerance)
+5. **Disc polling suppression** &mdash; Drive polling is paused during the entire extraction phase (MakeMKV + FFmpeg fallback) to prevent concurrent disc access conflicts
 
 ## Legacy Scripts
 
