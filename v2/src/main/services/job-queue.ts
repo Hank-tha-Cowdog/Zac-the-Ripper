@@ -5,10 +5,12 @@ import { join, dirname } from 'path'
 import { mkdirSync, rmSync, copyFileSync } from 'fs'
 import { MakeMKVService } from './makemkv'
 import { FFmpegService } from './ffmpeg'
+import { FFmpegRipperService } from './ffmpeg-ripper'
 import { FFprobeService } from './ffprobe'
 import { KodiOutputService, EXTRAS_FOLDER_MAP } from './kodi-output'
 import { TMDBService } from './tmdb'
 import type { DiscInfo } from './disc-detection'
+import type { ReadError } from './makemkv'
 import * as jobQueries from '../database/queries/jobs'
 import * as discQueries from '../database/queries/discs'
 import * as outputFileQueries from '../database/queries/output-files'
@@ -40,6 +42,7 @@ export class JobQueueService {
   private static instance: JobQueueService
   private queue: QueuedJob[] = []
   private ffmpegService = new FFmpegService()
+  private ffmpegRipperService = new FFmpegRipperService()
   private ffprobeService = new FFprobeService()
   private kodiService = new KodiOutputService()
   private tmdbService = new TMDBService()
@@ -163,7 +166,8 @@ export class JobQueueService {
         preserveInterlaced: params.preserveInterlaced,
         convertSubsToSrt: params.convertSubsToSrt,
         kodiOptions: params.kodiOptions,
-        discId: disc.id
+        discId: disc.id,
+        discInfo: discInfo || undefined
       })
 
       return { jobId, dbId: mkvJob.id }
@@ -231,6 +235,7 @@ export class JobQueueService {
     convertSubsToSrt: boolean
     kodiOptions?: unknown
     discId: number
+    discInfo?: DiscInfo
   }): Promise<void> {
     const { discIndex, titleIds, outputDir, window, makemkvService, modes } = params
 
@@ -260,11 +265,19 @@ export class JobQueueService {
           })
         }
 
+        // Build read error summary for UI
+        const readErrorSummary = this.buildReadErrorSummary(result.readErrors)
+
         window.webContents.send(IPC.RIP_COMPLETE, {
           jobId,
-          outputFiles: result.outputFiles
+          outputFiles: result.outputFiles,
+          readErrors: result.readErrors,
+          readErrorSummary
         })
-        notifyJobComplete('MKV Rip', result.outputFiles[0]).catch(() => {})
+        const notifyMsg = readErrorSummary
+          ? `MKV Rip (with ${result.readErrors?.length} read errors)`
+          : 'MKV Rip'
+        notifyJobComplete(notifyMsg, result.outputFiles[0]).catch(() => {})
 
         // Queue follow-up encoding jobs
         for (const filePath of result.outputFiles) {
@@ -279,7 +292,7 @@ export class JobQueueService {
             })
           }
           if (modes.includes('streaming_encode') || modes.includes('h264_streaming')) {
-            const codec = getSetting('encoding.codec') || 'hevc'
+            const codec = getSetting('encoding.codec') || 'h264'
             const preset = codec === 'hevc' ? 'hevc' : 'h264'
             await this.createEncodeJob({
               inputPath: filePath,
@@ -292,10 +305,73 @@ export class JobQueueService {
           }
         }
       } else {
-        jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
-        this.updateQueueItem(jobId, 'failed')
-        window.webContents.send(IPC.RIP_ERROR, { jobId, error: result.error })
-        notifyJobFailed('MKV Rip', result.error).catch(() => {})
+        // MakeMKV failed — try ffmpeg VOB fallback for DVDs
+        if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
+          log.info(`[rip] MakeMKV failed — attempting ffmpeg VOB fallback for DVD`)
+          window.webContents.send(IPC.RIP_PROGRESS, {
+            jobId, percentage: 5,
+            message: 'MakeMKV failed, trying ffmpeg VOB fallback...'
+          })
+
+          const fallbackResult = await this.ffmpegRipperService.ripTitlesFromVOB({
+            jobId, discInfo: params.discInfo, titleIds,
+            outputDir, window,
+            onProgress: (pct, message) => {
+              window.webContents.send(IPC.RIP_PROGRESS, {
+                jobId, percentage: pct,
+                message: `Extracting (ffmpeg): ${pct.toFixed(0)}%`
+              })
+            }
+          })
+
+          if (fallbackResult.success && fallbackResult.outputFiles.length > 0) {
+            log.info(`[rip] FFmpeg fallback succeeded — ${fallbackResult.outputFiles.length} file(s)`)
+            jobQueries.updateJobStatus(dbId, 'completed')
+            this.updateQueueItem(jobId, 'completed')
+
+            for (const filePath of fallbackResult.outputFiles) {
+              outputFileQueries.createOutputFile({ job_id: dbId, file_path: filePath, format: 'mkv' })
+            }
+
+            window.webContents.send(IPC.RIP_COMPLETE, {
+              jobId, outputFiles: fallbackResult.outputFiles,
+              readErrorSummary: 'Ripped via ffmpeg VOB fallback (MakeMKV failed)'
+            })
+            notifyJobComplete('MKV Rip (ffmpeg fallback)', fallbackResult.outputFiles[0]).catch(() => {})
+
+            // Queue follow-up encoding jobs
+            for (const filePath of fallbackResult.outputFiles) {
+              if (modes.includes('ffv1_archival')) {
+                await this.createEncodeJob({
+                  inputPath: filePath,
+                  outputDir: expandPath(getSetting('paths.ffv1_output') || outputDir),
+                  preset: 'ffv1', preserveInterlaced: params.preserveInterlaced,
+                  convertSubsToSrt: params.convertSubsToSrt, window
+                })
+              }
+              if (modes.includes('streaming_encode') || modes.includes('h264_streaming')) {
+                const codec = getSetting('encoding.codec') || 'h264'
+                const preset = codec === 'hevc' ? 'hevc' : 'h264'
+                await this.createEncodeJob({
+                  inputPath: filePath,
+                  outputDir: expandPath(getSetting('paths.streaming_output') || getSetting('paths.h264_output') || outputDir),
+                  preset, preserveInterlaced: params.preserveInterlaced,
+                  convertSubsToSrt: params.convertSubsToSrt, window
+                })
+              }
+            }
+          } else {
+            jobQueries.updateJobStatus(dbId, 'failed', { error_message: fallbackResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed' })
+            this.updateQueueItem(jobId, 'failed')
+            window.webContents.send(IPC.RIP_ERROR, { jobId, error: fallbackResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed' })
+            notifyJobFailed('MKV Rip', fallbackResult.error || 'Both MakeMKV and ffmpeg fallback failed').catch(() => {})
+          }
+        } else {
+          jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
+          this.updateQueueItem(jobId, 'failed')
+          window.webContents.send(IPC.RIP_ERROR, { jobId, error: result.error })
+          notifyJobFailed('MKV Rip', result.error).catch(() => {})
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -374,10 +450,15 @@ export class JobQueueService {
       // ── Determine final library output paths ──────────────────────
       if (!primaryLibraryPath) throw new Error('Library path not configured — set it in Settings > Jellyfin or Settings > Kodi')
 
-      // When trackMeta has categories, ignore isExtrasDisc — trackMeta takes precedence.
-      // isExtrasDisc is only used for legacy single-file-to-Extras mode (no trackMeta).
-      const hasTrackMeta = params.trackMeta && params.trackMeta.length > 0
-      const hasMainTrack = hasTrackMeta && params.trackMeta!.some(m => m.category === 'main')
+      // When isExtrasDisc is true, ALL tracks are extras — override any 'main' category
+      // in trackMeta so nothing gets written to the main movie directory.
+      const trackMetaOverridden = (opts?.isExtrasDisc && params.trackMeta)
+        ? params.trackMeta.map(m => m.category === 'main'
+          ? { ...m, category: 'featurette' }
+          : m)
+        : params.trackMeta
+      const hasTrackMeta = trackMetaOverridden && trackMetaOverridden.length > 0
+      const hasMainTrack = hasTrackMeta && trackMetaOverridden!.some(m => m.category === 'main')
       const useExtrasDiscMode = opts?.isExtrasDisc && !hasTrackMeta
 
       // Always compute the movie root dir (Movies/Title (Year)/) — extras subfolders go here
@@ -435,7 +516,7 @@ export class JobQueueService {
       })()
 
       // ── Determine encoding preset ──
-      const codec = getSetting('encoding.codec') || 'hevc'
+      const codec = getSetting('encoding.codec') || 'h264'
       const preset = codec === 'hevc' ? 'hevc' : 'h264'
       log.info(`[media-lib] Codec preset: ${preset}`)
 
@@ -445,7 +526,7 @@ export class JobQueueService {
       log.info(`[media-lib] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
       getDiscDetectionService().rippingInProgress = true
 
-      const extractResult = await makemkvService.ripTitles({
+      let extractResult = await makemkvService.ripTitles({
         jobId,
         discIndex,
         titleIds,
@@ -464,13 +545,40 @@ export class JobQueueService {
       getDiscDetectionService().rippingInProgress = false
 
       if (!extractResult.success || extractResult.outputFiles.length === 0) {
-        throw new Error(extractResult.error || 'MKV extraction produced no files')
+        // MakeMKV failed — try ffmpeg VOB fallback for DVDs
+        if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
+          log.info(`[media-lib] MakeMKV failed — attempting ffmpeg VOB fallback`)
+          sendProgress(5, 'Step 1/3 — MakeMKV failed, trying ffmpeg fallback...')
+
+          extractResult = await this.ffmpegRipperService.ripTitlesFromVOB({
+            jobId,
+            discInfo: params.discInfo,
+            titleIds,
+            outputDir: stagingDir,
+            window,
+            onProgress: (pct, message) => {
+              ripPct = pct
+              if (phase === 'rip') {
+                sendProgress(pct * 0.5, `Step 1/3 — Extracting (ffmpeg): ${pct.toFixed(0)}%`)
+              }
+            }
+          })
+
+          if (!extractResult.success || extractResult.outputFiles.length === 0) {
+            throw new Error(extractResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed')
+          }
+          log.info(`[media-lib] FFmpeg fallback succeeded — ${extractResult.outputFiles.length} file(s)`)
+        } else {
+          throw new Error(extractResult.error || 'MKV extraction produced no files')
+        }
       }
 
-      log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted`)
+      log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted` +
+        (extractResult.readErrors?.length ? `, ${extractResult.readErrors.length} read error(s)` : ''))
 
       // ── Determine main feature vs extras from trackMeta ──────────
-      const trackMetaList = params.trackMeta
+      // Use the overridden list (where 'main' → 'featurette' when isExtrasDisc)
+      const trackMetaList = trackMetaOverridden
       let mainFileIndex = 0
       if (trackMetaList && trackMetaList.length > 0) {
         const mainMeta = trackMetaList.findIndex(m => m.category === 'main')
@@ -717,7 +825,7 @@ export class JobQueueService {
           })
         }
         if (modes.includes('streaming_encode') || modes.includes('h264_streaming')) {
-          const streamCodec = getSetting('encoding.codec') || 'hevc'
+          const streamCodec = getSetting('encoding.codec') || 'h264'
           const streamPreset = streamCodec === 'hevc' ? 'hevc' : 'h264'
           await this.createEncodeJob({
             inputPath: filePath,
@@ -735,8 +843,17 @@ export class JobQueueService {
       jobQueries.updateJobStatus(dbId, 'completed')
       this.updateQueueItem(jobId, 'completed')
       const allOutputFiles = skipMainEncode ? extrasOutputFiles : [finalVideoPath, ...extrasOutputFiles]
-      window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: allOutputFiles })
-      notifyJobComplete(movieTitle, allOutputFiles[0] || movieRootDir).catch(() => {})
+      const readErrorSummary = this.buildReadErrorSummary(extractResult.readErrors)
+      window.webContents.send(IPC.RIP_COMPLETE, {
+        jobId,
+        outputFiles: allOutputFiles,
+        readErrors: extractResult.readErrors,
+        readErrorSummary
+      })
+      const notifyMsg = readErrorSummary
+        ? `${movieTitle} (with ${extractResult.readErrors?.length} read errors)`
+        : movieTitle
+      notifyJobComplete(notifyMsg, allOutputFiles[0] || movieRootDir).catch(() => {})
 
       log.info(`[media-lib] Pipeline complete — ${allOutputFiles.length} file(s) in ${movieRootDir}`)
     } catch (err) {
@@ -855,6 +972,7 @@ export class JobQueueService {
 
     if (item.status === 'running') {
       this.ffmpegService.cancelJob(jobId)
+      this.ffmpegRipperService.cancelJob(jobId)
       jobQueries.updateJobStatus(item.dbId, 'cancelled')
       this.updateQueueItem(jobId, 'cancelled')
     } else if (item.status === 'pending') {
@@ -867,6 +985,18 @@ export class JobQueueService {
 
   getActiveJobs(): QueuedJob[] {
     return this.queue.filter(j => j.status === 'running' || j.status === 'pending')
+  }
+
+  private buildReadErrorSummary(readErrors?: ReadError[]): string | null {
+    if (!readErrors || readErrors.length === 0) return null
+    const byFile = new Map<string, number>()
+    for (const err of readErrors) {
+      byFile.set(err.file, (byFile.get(err.file) || 0) + 1)
+    }
+    const lines = [...byFile.entries()]
+      .map(([file, count]) => `${file}: ${count} error(s)`)
+      .join(', ')
+    return `${readErrors.length} read error(s) — ${lines}`
   }
 
   private updateQueueItem(jobId: string, status: QueuedJob['status']): void {

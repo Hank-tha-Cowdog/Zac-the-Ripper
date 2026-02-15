@@ -21,6 +21,19 @@ export interface RipProgress {
   message: string
 }
 
+export interface ReadError {
+  file: string      // e.g. "/VIDEO_TS/VTS_02_1.VOB"
+  offset: string    // e.g. "116785152"
+  errorType: string // e.g. "HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT"
+}
+
+export interface RipResult {
+  success: boolean
+  outputFiles: string[]
+  error?: string
+  readErrors?: ReadError[]
+}
+
 /** Expand leading ~ to the user's home directory */
 function expandPath(p: string): string {
   if (p.startsWith('~/') || p === '~') {
@@ -50,11 +63,12 @@ export class MakeMKVService {
     onProgress?: (percentage: number, message: string) => void
     /** If provided, called when the first MKV file is created in the output dir */
     onFileCreated?: (filePath: string) => void
-  }): Promise<{ success: boolean; outputFiles: string[]; error?: string }> {
+  }): Promise<RipResult> {
     const { jobId, discIndex, titleIds, window, onProgress, onFileCreated } = params
     const outputDir = expandPath(params.outputDir)
     const makemkvcon = this.getMakeMKVPath()
     const outputFiles: string[] = []
+    const allReadErrors: ReadError[] = []
     const totalTitles = titleIds.length
 
     // Ensure output directory exists
@@ -75,8 +89,13 @@ export class MakeMKVService {
         onFileCreated: idx === 0 ? onFileCreated : undefined // Only for first title
       })
 
+      // Collect read errors from this title
+      if (result.readErrors && result.readErrors.length > 0) {
+        allReadErrors.push(...result.readErrors)
+      }
+
       if (!result.success) {
-        return { success: false, outputFiles, error: result.error }
+        return { success: false, outputFiles, error: result.error, readErrors: allReadErrors }
       }
 
       if (result.outputFiles.length > 0) {
@@ -84,7 +103,13 @@ export class MakeMKVService {
       }
     }
 
-    return { success: true, outputFiles }
+    // Log read error summary if any occurred
+    if (allReadErrors.length > 0) {
+      const affectedFiles = [...new Set(allReadErrors.map(e => e.file))]
+      log.warn(`[rip] Completed with ${allReadErrors.length} read error(s) across ${affectedFiles.length} file(s): ${affectedFiles.join(', ')}`)
+    }
+
+    return { success: true, outputFiles, readErrors: allReadErrors }
   }
 
   private ripSingleTitle(params: {
@@ -98,7 +123,7 @@ export class MakeMKVService {
     totalTitles: number
     onProgress?: (percentage: number, message: string) => void
     onFileCreated?: (filePath: string) => void
-  }): Promise<{ success: boolean; outputFiles: string[]; error?: string }> {
+  }): Promise<RipResult> {
     const { jobId, discIndex, titleId, outputDir, window, makemkvcon,
             titleIndex, totalTitles, onProgress, onFileCreated } = params
 
@@ -113,8 +138,18 @@ export class MakeMKVService {
     const titleLabel = totalTitles > 1 ? `Title ${titleIndex + 1}/${totalTitles}` : 'Ripping'
     let fileCreatedNotified = false
 
+    // ── Read error tracking ──────────────────────────────────────────
+    // MakeMKV retries bad sectors before moving on. We track all errors
+    // and report them after completion. Only abort if progress truly
+    // stalls (process stuck) or the disc is extremely damaged.
+    const MAX_TOTAL_ERRORS = 100       // Abort threshold for severely damaged discs
+    const PROGRESS_STALL_MS = 15 * 60 * 1000 // 15 min stall = truly stuck
+
     return new Promise((resolve) => {
       let failed = false
+      let lastProgressTime = Date.now()
+      let stallTimer: ReturnType<typeof setInterval> | null = null
+      const readErrors: ReadError[] = []
 
       const proc = runProcess({
         command: makemkvcon,
@@ -136,8 +171,12 @@ export class MakeMKVService {
             // Overall progress across all titles
             const overallPct = ((titleIndex + titlePct / 100) / totalTitles) * 100
 
+            // Any progress update means MakeMKV is still working
+            lastProgressTime = Date.now()
+
+            const errorSuffix = readErrors.length > 0 ? ` (${readErrors.length} read errors)` : ''
             if (onProgress) {
-              onProgress(overallPct, `${titleLabel} — ${titlePct.toFixed(0)}%`)
+              onProgress(overallPct, `${titleLabel} — ${titlePct.toFixed(0)}%${errorSuffix}`)
             } else {
               window.webContents.send(IPC.RIP_PROGRESS, {
                 jobId,
@@ -145,7 +184,7 @@ export class MakeMKVService {
                 total: max,
                 percentage: overallPct,
                 title: titleLabel,
-                message: `${titleLabel} — ${titlePct.toFixed(0)}%`
+                message: `${titleLabel} — ${titlePct.toFixed(0)}%${errorSuffix}`
               })
             }
 
@@ -170,13 +209,37 @@ export class MakeMKVService {
             if (match) log.info(`Progress: ${match[1]}`)
           }
 
-          // Parse MSG: messages — detect failures
+          // Parse MSG: messages — detect failures and track read errors
           if (line.startsWith('MSG:')) {
             const match = line.match(/MSG:\d+,\d+,\d+,"(.+)"/)
             if (match) {
-              log.info(`MakeMKV: ${match[1]}`)
-              if (match[1].includes('Failed to save title') || match[1].includes('0 titles saved')) {
+              const msgText = match[1]
+              log.info(`MakeMKV: ${msgText}`)
+
+              if (msgText.includes('Failed to save title') || msgText.includes('0 titles saved')) {
                 failed = true
+              }
+
+              // Track read errors — parse file path and offset from MakeMKV error messages
+              // Format: "Error 'TYPE' occurred while reading 'FILE' at offset 'OFFSET'"
+              const errorMatch = msgText.match(/Error '([^']+)' occurred while reading '([^']+)' at offset '([^']+)'/)
+              if (errorMatch) {
+                const [, errorType, file, offset] = errorMatch
+                readErrors.push({ file, offset, errorType })
+
+                // Also count as activity — MakeMKV is working, just hitting bad sectors
+                lastProgressTime = Date.now()
+
+                if (readErrors.length <= 10 || readErrors.length % 10 === 0) {
+                  log.warn(`[rip] Read error #${readErrors.length}: ${errorType} on ${file} @ offset ${offset}`)
+                }
+
+                // Abort only on extreme damage — disc is basically destroyed
+                if (readErrors.length >= MAX_TOTAL_ERRORS) {
+                  log.error(`[rip] Aborting: ${readErrors.length} total read errors — disc is severely damaged`)
+                  failed = true
+                  proc.kill()
+                }
               }
             }
           }
@@ -185,10 +248,27 @@ export class MakeMKVService {
           log.debug(`MakeMKV stderr: ${line}`)
         },
         onExit: (code) => {
+          if (stallTimer) clearInterval(stallTimer)
           this.activeProcesses.delete(jobId)
 
-          if (code !== 0) {
-            resolve({ success: false, outputFiles: [], error: `MakeMKV exited with code ${code}` })
+          // Log read error summary
+          if (readErrors.length > 0) {
+            const affectedFiles = [...new Set(readErrors.map(e => e.file))]
+            log.warn(`[rip] Title ${titleId} finished with ${readErrors.length} read error(s) in: ${affectedFiles.join(', ')}`)
+          }
+
+          if (failed && readErrors.length >= MAX_TOTAL_ERRORS) {
+            resolve({
+              success: false,
+              outputFiles: [],
+              readErrors,
+              error: `Disc is severely damaged: ${readErrors.length} read errors on title ${titleId}. Affected files: ${[...new Set(readErrors.map(e => e.file))].join(', ')}`
+            })
+            return
+          }
+
+          if (code !== 0 && !failed) {
+            resolve({ success: false, outputFiles: [], readErrors, error: `MakeMKV exited with code ${code}` })
             return
           }
 
@@ -203,20 +283,30 @@ export class MakeMKVService {
           }
 
           if (failed || newFiles.length === 0) {
-            log.error(`MakeMKV reported success (code=0) but no new MKV files found for title ${titleId}`)
-            resolve({
-              success: false,
-              outputFiles: [],
-              error: `No output files created for title ${titleId}. Check that the output directory exists and is writable.`
-            })
+            const reason = failed
+              ? `Rip failed on title ${titleId} with ${readErrors.length} read error(s). The disc may be scratched or damaged.`
+              : `No output files created for title ${titleId}. Check that the output directory exists and is writable.`
+            log.error(`MakeMKV failed for title ${titleId}: ${reason}`)
+            resolve({ success: false, outputFiles: [], readErrors, error: reason })
           } else {
             log.info(`Ripped title ${titleId}: ${newFiles.join(', ')}`)
-            resolve({ success: true, outputFiles: newFiles })
+            resolve({ success: true, outputFiles: newFiles, readErrors })
           }
         }
       })
 
       this.activeProcesses.set(jobId, proc)
+
+      // Progress stall watchdog — kills the process only if truly stuck
+      // (no progress AND no error messages for 15 minutes)
+      stallTimer = setInterval(() => {
+        const stalledMs = Date.now() - lastProgressTime
+        if (stalledMs >= PROGRESS_STALL_MS) {
+          log.error(`[rip] Aborting: no activity for ${(stalledMs / 60000).toFixed(0)} minutes — process appears stuck`)
+          failed = true
+          proc.kill()
+        }
+      }, 30000) // Check every 30 seconds
     })
   }
 

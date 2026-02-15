@@ -65,7 +65,8 @@ function getH264Args(context: EncodingContext): string[] {
   const preset = getSetting('encoding.h264_preset') || 'slow'
   const maxrate = getSetting('encoding.h264_maxrate') || '15M'
   const bufsize = getSetting('encoding.h264_bufsize') || '30M'
-  const hwAccel = getSetting('encoding.hw_accel') || 'software'
+  const hwAccel = getSetting('encoding.hw_accel') || 'videotoolbox'
+  const vtQuality = getSetting('encoding.h264_vt_quality') || '65'
 
   const args: string[] = []
   const vfFilters: string[] = []
@@ -117,11 +118,11 @@ function getH264Args(context: EncodingContext): string[] {
   switch (hwAccel) {
     case 'videotoolbox':
       // VideoToolbox: NO CRF support. Use -q:v (0-100, higher=better quality)
-      // -q:v 65 is roughly equivalent to CRF 18 in perceived quality
+      // 65 is roughly equivalent to CRF 18 in perceived quality
       args.push(
         '-c:v', 'h264_videotoolbox',
         '-profile:v', 'high',
-        '-q:v', '65',
+        '-q:v', vtQuality,
         '-allow_sw', '1' // Fallback to software if HW encoder is busy
       )
       break

@@ -77,8 +77,9 @@ export const DEFAULT_SETTINGS: Record<string, { value: string; category: string 
   'general.mode_plex_export': { value: 'false', category: 'general' },
 
   // Encoding
-  'encoding.codec': { value: 'hevc', category: 'encoding' },
+  'encoding.codec': { value: 'h264', category: 'encoding' },
   'encoding.hevc_quality': { value: '95', category: 'encoding' },
+  'encoding.h264_vt_quality': { value: '65', category: 'encoding' },
   'encoding.h264_crf': { value: '18', category: 'encoding' },
   'encoding.h264_preset': { value: 'slow', category: 'encoding' },
   'encoding.h264_maxrate': { value: '15M', category: 'encoding' },

@@ -215,7 +215,7 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
     {
       name: '008_seed_new_encoding_settings',
       sql: `
-        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('encoding.codec', 'hevc', 'encoding');
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('encoding.codec', 'h264', 'encoding');
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('encoding.hevc_quality', '95', 'encoding');
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('paths.streaming_output', '~/Movies/Zac the Ripper/Streaming', 'paths');
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('general.mode_streaming_encode', 'false', 'general');
@@ -344,6 +344,13 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
         ALTER TABLE jobs_new RENAME TO jobs;
         CREATE INDEX IF NOT EXISTS idx_jobs_disc ON jobs(disc_id);
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+      `
+    },
+    {
+      name: '019_default_codec_h264',
+      sql: `
+        UPDATE settings SET value = 'h264' WHERE key = 'encoding.codec' AND value = 'hevc';
+        INSERT OR IGNORE INTO settings (key, value, category) VALUES ('encoding.h264_vt_quality', '65', 'encoding');
       `
     }
   ]

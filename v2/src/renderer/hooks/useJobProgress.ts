@@ -30,12 +30,24 @@ export function useJobProgress() {
     })
 
     const cleanupComplete = window.ztr.rip.onComplete((data: unknown) => {
-      const d = data as { jobId: string; outputFiles?: string[] }
+      const d = data as { jobId: string; outputFiles?: string[]; readErrorSummary?: string }
       completeJob(d.jobId, d.outputFiles)
+
+      if (d.readErrorSummary) {
+        addLog({
+          timestamp: new Date().toISOString(),
+          level: 'warn',
+          message: `Completed with disc read errors: ${d.readErrorSummary}`,
+          jobId: d.jobId
+        })
+      }
+
       addLog({
         timestamp: new Date().toISOString(),
         level: 'info',
-        message: 'Job completed successfully',
+        message: d.readErrorSummary
+          ? 'Job completed with warnings — some sectors were unreadable'
+          : 'Job completed successfully',
         jobId: d.jobId
       })
     })

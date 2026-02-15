@@ -42,7 +42,10 @@ export function SystemStatusBar() {
   const toolTooltips: Record<string, string> = {
     makemkvcon: 'MakeMKV — required for ripping discs. Download from makemkv.com or configure path in Settings > Tool Paths.',
     ffmpeg: 'FFmpeg — required for encoding (FFV1, HEVC, H.264). Bundled with the app, or install via Homebrew: brew install ffmpeg',
-    ffprobe: 'FFprobe — required for media analysis. Bundled with the app, or installed with FFmpeg.'
+    ffprobe: 'FFprobe — required for media analysis. Bundled with the app, or installed with FFmpeg.',
+    mpv: 'mpv — optional, enables disc preview with full playback controls. Install via Homebrew: brew install mpv',
+    ffplay: 'ffplay — optional fallback for disc preview (bundled with FFmpeg). Install via Homebrew: brew install ffmpeg',
+    lsdvd: 'lsdvd — optional, provides fallback DVD scanning when MakeMKV hangs on certain discs. Install via Homebrew: brew install lsdvd'
   }
 
   return (

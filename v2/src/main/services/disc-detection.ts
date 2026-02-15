@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, exec } from 'child_process'
 import { promisify } from 'util'
 import { existsSync } from 'fs'
 import { runProcess } from '../util/process-runner'
@@ -7,6 +7,7 @@ import { createLogger } from '../util/logger'
 import { findToolPath, getPlatform } from '../util/platform'
 
 const execFileAsync = promisify(execFile)
+const execAsync = promisify(exec)
 const log = createLogger('disc-detection')
 
 export interface DriveInfo {
@@ -40,6 +41,7 @@ export interface TrackInfo {
   isInterlaced: boolean
   audioTracks: AudioTrack[]
   subtitleTracks: SubtitleTrack[]
+  vtsNumber?: number  // VTS number from lsdvd (1-based), used for ffmpeg VOB fallback
 }
 
 export interface AudioTrack {
@@ -66,6 +68,8 @@ export class DiscDetectionService {
   private lastDrives: DriveInfo[] = []
   // In-flight guard: deduplicate concurrent scanDrives() calls
   private scanInFlight: Promise<DriveInfo[]> | null = null
+  // Reference to the in-flight --noscan process so we can kill it if needed
+  private scanProcess: ReturnType<typeof runProcess> | null = null
   // Ripping guard: when a MakeMKV rip/backup is active, skip disc polling
   private _rippingInProgress = false
 
@@ -104,9 +108,22 @@ export class DiscDetectionService {
     this.scanInFlight = this._scanDrivesImpl()
     try {
       return await this.scanInFlight
+    } catch (err) {
+      log.warn(`scanDrives: scan failed: ${err}`)
+      return this.lastDrives
     } finally {
       this.scanInFlight = null
     }
+  }
+
+  /** Kill any in-flight --noscan scan process to free the drive for exclusive access */
+  private cancelInFlightScan(): void {
+    if (this.scanProcess) {
+      log.info('cancelInFlightScan: killing in-flight --noscan process')
+      this.scanProcess.kill()
+      this.scanProcess = null
+    }
+    this.scanInFlight = null
   }
 
   private async _scanDrivesImpl(): Promise<DriveInfo[]> {
@@ -124,6 +141,7 @@ export class DiscDetectionService {
     log.debug(`scanDrives: MakeMKV found ${drives.length} drive(s), OS found ${osInfo.length} drive(s)`)
 
     if (drives.length === 0) {
+      this.lastDrives = osInfo
       return osInfo
     }
 
@@ -302,7 +320,28 @@ export class DiscDetectionService {
     const drives: DriveInfo[] = []
 
     return new Promise((resolve) => {
-      runProcess({
+      let resolved = false
+      const done = () => {
+        if (resolved) return
+        resolved = true
+        this.scanProcess = null
+        log.info(`MakeMKV: Found ${drives.length} drive(s)`)
+        resolve(drives)
+      }
+
+      // Timeout: kill the process if --noscan takes more than 15 seconds
+      // (it should complete in 1-3s; hangs happen when the drive is busy)
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          log.warn('scanDrivesViaMakeMKV: timed out after 15s, killing process')
+          if (this.scanProcess) {
+            this.scanProcess.kill()
+          }
+          done()
+        }
+      }, 15000)
+
+      this.scanProcess = runProcess({
         command: makemkvcon,
         args: ['--robot', '--noscan', 'info', 'disc:9999'],
         onStdout: (line) => {
@@ -351,24 +390,301 @@ export class DiscDetectionService {
           }
         },
         onExit: () => {
-          log.info(`MakeMKV: Found ${drives.length} drive(s)`)
-          resolve(drives)
+          clearTimeout(timeout)
+          done()
         }
       })
     })
   }
 
   async getDiscInfo(discIndex: number): Promise<DiscInfo | null> {
+    // Kill any in-flight --noscan polling process before starting a full scan,
+    // because MakeMKV cannot handle concurrent drive access
+    this.cancelInFlightScan()
     this.fullScanInProgress = true
     log.info(`getDiscInfo(${discIndex}) — acquiring scan lock`)
     try {
       if (this.hasMakeMKV()) {
-        return await this.getDiscInfoViaMakeMKV(discIndex)
+        const result = await this.getDiscInfoViaMakeMKV(discIndex)
+        if (result) return result
+
+        // MakeMKV failed (timeout, hung, etc.) — try lsdvd fallback for DVDs
+        log.warn(`getDiscInfo(${discIndex}) — MakeMKV scan failed, trying lsdvd fallback`)
+        const lsdvdResult = await this.getDiscInfoViaLsdvd(discIndex)
+        if (lsdvdResult) return lsdvdResult
       }
       return await this.getDiscInfoViaOS(discIndex)
     } finally {
       this.fullScanInProgress = false
       log.info(`getDiscInfo(${discIndex}) — scan lock released`)
+    }
+  }
+
+  // ─── lsdvd fallback (for DVDs when MakeMKV fails) ──────────────────
+
+  private async getDiscInfoViaLsdvd(discIndex: number): Promise<DiscInfo | null> {
+    // lsdvd uses libdvdread to parse IFO files — different code path than MakeMKV
+    const lsdvdPath = findToolPath('lsdvd')
+    if (!lsdvdPath) {
+      log.info('lsdvd not available for fallback')
+      return null
+    }
+
+    // Find the device path from the drives list
+    const drives = this.lastDrives || []
+    const drive = drives[discIndex]
+    if (!drive) {
+      log.warn(`lsdvd fallback: no drive at index ${discIndex}`)
+      return null
+    }
+
+    const devicePath = drive.devicePath || `/dev/rdisk${discIndex + 4}` // fallback guess
+
+    try {
+      log.info(`lsdvd fallback: scanning ${devicePath} with JSON output`)
+      const { stdout } = await execFileAsync(lsdvdPath, ['-x', '-Oj', devicePath], { timeout: 30000 })
+
+      const info: Partial<DiscInfo> = {
+        tracks: [],
+        metadata: { scanMethod: 'lsdvd' }
+      }
+
+      // Parse JSON output from lsdvd -Oj
+      let lsdvdData: Record<string, unknown>
+      try {
+        lsdvdData = JSON.parse(stdout)
+      } catch (parseErr) {
+        log.warn(`lsdvd JSON parse failed, falling back to text mode: ${parseErr}`)
+        return this.getDiscInfoViaLsdvdText(devicePath, drive)
+      }
+
+      info.title = (lsdvdData.title as string) || drive.discTitle || 'Unknown'
+      info.discId = (lsdvdData.device as string) || `lsdvd-${devicePath}`
+      info.discType = 'DVD' // lsdvd only works with DVDs
+
+      const lsdvdTracks = (lsdvdData.track as Array<Record<string, unknown>>) || []
+      const tracks: TrackInfo[] = []
+
+      for (const track of lsdvdTracks) {
+        const titleNum = (track.ix as number) || 0
+        const durationSeconds = (track.length as number) || 0
+        const h = Math.floor(durationSeconds / 3600)
+        const m = Math.floor((durationSeconds % 3600) / 60)
+        const s = Math.floor(durationSeconds % 60)
+
+        const vtsNumber = (track.vts as number) || undefined
+        const chapters = Array.isArray(track.chapter) ? (track.chapter as unknown[]).length : 0
+
+        // Parse audio tracks
+        const audioTracks: AudioTrack[] = []
+        const audioArr = (track.audio as Array<Record<string, unknown>>) || []
+        for (let ai = 0; ai < audioArr.length; ai++) {
+          const a = audioArr[ai]
+          const ch = (a.channels as number) || 2
+          audioTracks.push({
+            id: ai,
+            codec: (a.format as string) || (a.content as string) || '',
+            language: (a.langcode as string) || (a.language as string) || '',
+            channels: ch === 6 ? '5.1' : ch === 2 ? 'stereo' : `${ch}ch`,
+            bitrate: (a.ap_mode as string) || ''
+          })
+        }
+
+        // Parse subtitle tracks
+        const subtitleTracks: SubtitleTrack[] = []
+        const subArr = (track.subp as Array<Record<string, unknown>>) || []
+        for (let si = 0; si < subArr.length; si++) {
+          const sub = subArr[si]
+          subtitleTracks.push({
+            id: si,
+            type: 'vobsub',
+            language: (sub.langcode as string) || (sub.language as string) || '',
+            codec: 'dvdsub'
+          })
+        }
+
+        // Resolution and framerate from JSON (lsdvd -x provides these)
+        const width = (track.width as number) || 720
+        const height = (track.height as number) || 576
+        const fps = (track.fps as number) || 25
+        const resolution = `${width}x${height}`
+
+        tracks.push({
+          id: titleNum - 1, // MakeMKV uses 0-based, lsdvd uses 1-based
+          title: `Title ${titleNum}`,
+          duration: `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`,
+          durationSeconds,
+          size: '',
+          sizeBytes: 0,
+          chapters,
+          resolution,
+          framerate: String(fps),
+          isInterlaced: true, // DVDs are typically interlaced
+          audioTracks,
+          subtitleTracks,
+          vtsNumber
+        })
+      }
+
+      info.tracks = tracks
+      info.trackCount = tracks.length
+
+      // If JSON didn't include resolution data, use ffprobe as fallback
+      const needsProbe = tracks.length > 0 && tracks[0].resolution === '720x576' && !(lsdvdData.track as Array<Record<string, unknown>>)?.[0]?.width
+      if (needsProbe) {
+        try {
+          const mountPoint = this.findMountPoint(drive.discTitle || info.title || '')
+          if (mountPoint) {
+            const ffprobe = findToolPath('ffprobe')
+            if (ffprobe) {
+              const vob = `${mountPoint}/VIDEO_TS/VTS_01_1.VOB`
+              if (existsSync(vob)) {
+                const { stdout: probeOut } = await execFileAsync(ffprobe, [
+                  '-hide_banner', '-select_streams', 'v:0',
+                  '-show_entries', 'stream=width,height,r_frame_rate,field_order',
+                  '-of', 'csv=p=0', vob
+                ], { timeout: 10000 })
+                const probeParts = probeOut.trim().split(',')
+                if (probeParts.length >= 3) {
+                  const w = probeParts[0]
+                  const hVal = probeParts[1]
+                  const fpsStr = probeParts[2]
+                  const fpsParts = fpsStr.split('/')
+                  const fpsVal = fpsParts.length === 2
+                    ? String(Math.round(parseInt(fpsParts[0]) / parseInt(fpsParts[1]) * 100) / 100)
+                    : fpsStr
+                  const res = `${w}x${hVal}`
+                  const interlaced = (probeParts[3] || '').includes('tt') || (probeParts[3] || '').includes('tb')
+
+                  log.info(`lsdvd+ffprobe: resolution=${res} fps=${fpsVal} interlaced=${interlaced}`)
+                  for (const t of tracks) {
+                    t.resolution = res
+                    t.framerate = fpsVal
+                    t.isInterlaced = interlaced
+                  }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          log.debug(`lsdvd ffprobe enhancement failed: ${err}`)
+        }
+      }
+
+      // Compute fingerprint
+      const trackFingerprint = tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+      info.fingerprint = `${info.discId}::${tracks.length}::${trackFingerprint}`
+
+      log.info(`lsdvd fallback result: title="${info.title}" type=DVD discId="${info.discId}" tracks=${info.trackCount}`)
+      return info as DiscInfo
+    } catch (err) {
+      log.error(`lsdvd fallback failed: ${err}`)
+      return null
+    }
+  }
+
+  findMountPoint(discTitle: string): string | null {
+    // Check common mount points for the disc
+    const candidates = [
+      `/Volumes/${discTitle}`,
+      `/Volumes/${discTitle.replace(/\s+/g, '_')}`,
+      `/Volumes/${discTitle.toUpperCase()}`
+    ]
+    for (const path of candidates) {
+      if (existsSync(`${path}/VIDEO_TS`)) return path
+    }
+    return null
+  }
+
+  /** Text-mode lsdvd fallback when JSON output (-Oj) is not supported */
+  private async getDiscInfoViaLsdvdText(devicePath: string, drive: DriveInfo): Promise<DiscInfo | null> {
+    const lsdvdPath = findToolPath('lsdvd')
+    if (!lsdvdPath) return null
+
+    try {
+      const { stdout } = await execFileAsync(lsdvdPath, ['-a', '-s', '-c', devicePath], { timeout: 30000 })
+
+      const info: Partial<DiscInfo> = {
+        tracks: [],
+        metadata: { scanMethod: 'lsdvd-text' }
+      }
+
+      const titleMatch = stdout.match(/^Disc Title:\s*(.+)/m)
+      info.title = titleMatch ? titleMatch[1].trim() : drive.discTitle || 'Unknown'
+      const discIdMatch = stdout.match(/^DVDDiscID:\s*(\S+)/m)
+      info.discId = discIdMatch ? discIdMatch[1] : `lsdvd-${devicePath}`
+      info.discType = 'DVD'
+
+      const titleRegex = /^Title:\s*(\d+),\s*Length:\s*([\d:.]+)\s*Chapters:\s*(\d+).*Audio streams:\s*(\d+).*Subpictures:\s*(\d+)/gm
+      let match: RegExpExecArray | null
+      const tracks: TrackInfo[] = []
+
+      while ((match = titleRegex.exec(stdout)) !== null) {
+        const titleNum = parseInt(match[1], 10)
+        const duration = match[2]
+        const chapters = parseInt(match[3], 10)
+
+        const parts = duration.split(':')
+        const h = parseInt(parts[0], 10) || 0
+        const m = parseInt(parts[1], 10) || 0
+        const s = parseFloat(parts[2]) || 0
+        const durationSeconds = h * 3600 + m * 60 + s
+
+        const audioTracks: AudioTrack[] = []
+        const titleSection = stdout.substring(match.index)
+        const nextTitleIdx = titleSection.indexOf('\nTitle:', 1)
+        const section = nextTitleIdx > 0 ? titleSection.substring(0, nextTitleIdx) : titleSection
+        const audioRegex = /Audio:\s*(\d+).*Language:\s*(\w+).*Format:\s*(\w+).*Channels:\s*(\d+)/g
+        let audioMatch: RegExpExecArray | null
+        while ((audioMatch = audioRegex.exec(section)) !== null) {
+          audioTracks.push({
+            id: parseInt(audioMatch[1], 10),
+            codec: audioMatch[3],
+            language: audioMatch[2],
+            channels: audioMatch[4] === '6' ? '5.1' : audioMatch[4] === '2' ? 'stereo' : audioMatch[4] + 'ch',
+            bitrate: ''
+          })
+        }
+
+        const subtitleTracks: SubtitleTrack[] = []
+        const subRegex = /Subtitle:\s*(\d+).*Language:\s*(\w+)/g
+        let subMatch: RegExpExecArray | null
+        while ((subMatch = subRegex.exec(section)) !== null) {
+          subtitleTracks.push({
+            id: parseInt(subMatch[1], 10),
+            type: 'vobsub',
+            language: subMatch[2],
+            codec: 'dvdsub'
+          })
+        }
+
+        tracks.push({
+          id: titleNum - 1,
+          title: `Title ${titleNum}`,
+          duration: `${h}:${String(m).padStart(2, '0')}:${String(Math.floor(s)).padStart(2, '0')}`,
+          durationSeconds,
+          size: '',
+          sizeBytes: 0,
+          chapters,
+          resolution: '720x576',
+          framerate: '25',
+          isInterlaced: true,
+          audioTracks,
+          subtitleTracks
+        })
+      }
+
+      info.tracks = tracks
+      info.trackCount = tracks.length
+
+      const trackFingerprint = tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+      info.fingerprint = `${info.discId}::${tracks.length}::${trackFingerprint}`
+
+      log.info(`lsdvd text fallback result: title="${info.title}" tracks=${info.trackCount}`)
+      return info as DiscInfo
+    } catch (err) {
+      log.error(`lsdvd text fallback failed: ${err}`)
+      return null
     }
   }
 
@@ -438,22 +754,88 @@ export class DiscDetectionService {
 
     log.info(`getDiscInfo(${discIndex}) — scanning disc...`)
     return new Promise((resolve) => {
-      runProcess({
+      let resolved = false
+      let lastActivityTime = Date.now()
+      const scanStartTime = Date.now()
+      let activityTimer: ReturnType<typeof setInterval> | null = null
+      let inAnalysisPhase = false
+
+      // MakeMKV's disc analysis phase (after "Using direct disc access mode")
+      // is legitimately silent for 3-7+ minutes on complex discs with many titles.
+      // DVD extras discs with 20+ titles can take especially long.
+      // However, a deadlocked process shows 0% CPU immediately — a working
+      // MakeMKV always has CPU activity (CSS key exchange, IFO parsing, disc I/O).
+      const HARD_TIMEOUT_MS = 10 * 60 * 1000    // 10 min absolute max
+      const ACTIVITY_TIMEOUT_MS = 6 * 60 * 1000  // 6 min no output = stuck
+      const HEALTH_CHECK_INTERVAL_MS = 15000     // Check every 15s (was 30s)
+      const ZERO_CPU_KILL_COUNT = 3              // Kill after 3 consecutive 0% CPU readings
+      const ZERO_CPU_SILENCE_GATE_MS = 60000     // AND at least 60s of silence
+
+      const finish = (result: DiscInfo | null) => {
+        if (resolved) return
+        resolved = true
+        if (activityTimer) clearInterval(activityTimer)
+        const elapsed = ((Date.now() - scanStartTime) / 1000).toFixed(1)
+        log.info(`getDiscInfo(${discIndex}) — finished in ${elapsed}s (${result ? `${result.trackCount} tracks` : 'failed'})`)
+        resolve(result)
+      }
+
+      // Hard safety timeout
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          log.error(`getDiscInfo(${discIndex}) — hard timeout after 10 minutes, killing process`)
+          proc.kill()
+          finish(null)
+        }
+      }, HARD_TIMEOUT_MS)
+
+      const proc = runProcess({
         command: makemkvcon,
         args: ['--robot', 'info', `disc:${discIndex}`],
         onStdout: (line) => {
-          if (line.startsWith('CINFO:') || line.startsWith('TCOUNT:')) {
-            log.info(`MakeMKV info: ${line}`)
+          lastActivityTime = Date.now()
+
+          // Detect disc analysis phase (MakeMKV goes silent while reading disc structure)
+          if (line.includes('direct disc access mode') || line.includes('Opening disc')) {
+            inAnalysisPhase = true
+            log.info(`MakeMKV: Entered disc analysis phase — this can take several minutes for complex discs`)
           }
+
+          // Log everything for debugging disc scan issues
+          if (line.startsWith('MSG:')) {
+            const match = line.match(/MSG:\d+,\d+,\d+,"(.+)"/)
+            if (match) log.info(`MakeMKV: ${match[1]}`)
+          } else if (line.startsWith('PRGC:') || line.startsWith('PRGT:') || line.startsWith('PRGV:')) {
+            // Log progress at info level during analysis phase for visibility
+            if (inAnalysisPhase) {
+              log.info(`MakeMKV progress: ${line}`)
+              inAnalysisPhase = false // Got progress, analysis phase ended
+            } else {
+              log.debug(`MakeMKV progress: ${line}`)
+            }
+          } else if (line.startsWith('CINFO:') || line.startsWith('TCOUNT:')) {
+            if (inAnalysisPhase) inAnalysisPhase = false
+            log.info(`MakeMKV info: ${line}`)
+          } else if (line.startsWith('TINFO:') || line.startsWith('SINFO:')) {
+            if (inAnalysisPhase) inAnalysisPhase = false
+            log.debug(`MakeMKV track: ${line}`)
+          } else {
+            log.info(`MakeMKV: ${line}`)
+          }
+
           this.parseInfoLine(line, info, trackMap)
         },
         onStderr: (line) => {
-          log.debug(`MakeMKV stderr: ${line}`)
+          lastActivityTime = Date.now()
+          // Promote stderr to info level — MakeMKV sometimes outputs useful diagnostics here
+          log.info(`MakeMKV stderr: ${line}`)
         },
         onExit: (code) => {
+          clearTimeout(timeout)
+          if (activityTimer) clearInterval(activityTimer)
           if (code !== 0) {
             log.error(`MakeMKV info failed with code ${code}`)
-            resolve(null)
+            finish(null)
             return
           }
 
@@ -469,9 +851,63 @@ export class DiscDetectionService {
           info.fingerprint = `${info.discId}::${info.tracks.length}::${trackFingerprint}`
 
           log.info(`getDiscInfo result: title="${info.title}" type=${info.discType} discId="${info.discId}" fingerprint="${info.fingerprint}" tracks=${info.trackCount}`)
-          resolve(info as DiscInfo)
+          finish(info as DiscInfo)
         }
       })
+
+      log.info(`getDiscInfo(${discIndex}) — MakeMKV process spawned with pid=${proc.pid}`)
+
+      // Activity watchdog: periodically check process health and kill if truly stuck.
+      // A deadlocked MakeMKV shows 0% CPU immediately and never recovers.
+      // A legitimate scan always has CPU activity (CSS keys, IFO parsing, I/O).
+      let consecutiveZeroCpu = 0
+      activityTimer = setInterval(async () => {
+        const silentMs = Date.now() - lastActivityTime
+        const totalMs = Date.now() - scanStartTime
+        const silentSec = Math.round(silentMs / 1000)
+        const totalSec = Math.round(totalMs / 1000)
+
+        if (silentMs >= ACTIVITY_TIMEOUT_MS) {
+          log.error(`getDiscInfo(${discIndex}) — no output for ${silentSec}s (total elapsed: ${totalSec}s), killing process`)
+          proc.kill()
+          finish(null)
+          return
+        }
+
+        // Check process health during silence periods (after 30s of silence)
+        if (silentMs >= 30000 && proc.pid > 0) {
+          try {
+            const { stdout } = await execAsync(`ps -p ${proc.pid} -o %cpu=,rss=,state=`)
+            const parts = stdout.trim().split(/\s+/)
+            const cpu = parseFloat(parts[0] || '0')
+            const rssMb = Math.round(parseInt(parts[1] || '0', 10) / 1024)
+            const state = parts[2] || '?'
+
+            log.info(`getDiscInfo(${discIndex}) — process health: pid=${proc.pid} cpu=${cpu}% mem=${rssMb}MB state=${state} silent=${silentSec}s elapsed=${totalSec}s`)
+
+            // Track consecutive zero-CPU readings (process is truly stuck, not doing I/O)
+            if (cpu < 0.5) {
+              consecutiveZeroCpu++
+            } else {
+              consecutiveZeroCpu = 0
+            }
+
+            // Kill after N consecutive 0% CPU readings AND sufficient silence.
+            // With 15s interval: 3 checks = 45s of confirmed 0% CPU, kills at ~60s total.
+            if (consecutiveZeroCpu >= ZERO_CPU_KILL_COUNT && silentMs >= ZERO_CPU_SILENCE_GATE_MS) {
+              log.error(`getDiscInfo(${discIndex}) — process appears hung (0% CPU for ${consecutiveZeroCpu * (HEALTH_CHECK_INTERVAL_MS / 1000)}s, silent for ${silentSec}s), killing`)
+              proc.kill()
+              finish(null)
+              return
+            }
+          } catch {
+            // ps failed — process may have already exited
+            log.warn(`getDiscInfo(${discIndex}) — could not check process health (pid=${proc.pid}, may have exited)`)
+          }
+        } else if (silentMs >= 30000) {
+          log.info(`getDiscInfo(${discIndex}) — waiting for MakeMKV output (silent for ${silentSec}s, total elapsed: ${totalSec}s)`)
+        }
+      }, HEALTH_CHECK_INTERVAL_MS)
     })
   }
 

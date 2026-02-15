@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useRef } from 'react'
 import { useDiscStore } from '../stores/disc-store'
-import { cleanDiscTitle, generateTmdbQueries } from '../utils/title-utils'
+import { generateTmdbQueries } from '../utils/title-utils'
 
 interface UseDiscDetectionOptions {
   pollInterval?: number
@@ -19,8 +19,13 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
 
   const { setDrives, setScanning } = useDiscStore()
   const intervalRef = useRef<ReturnType<typeof setInterval>>()
-  // Track which disc we've auto-loaded (by discTitle) so we re-trigger for new discs
-  const autoLoadedDiscTitle = useRef<string | null>(null)
+  // Track whether we've auto-loaded for the current disc presence.
+  // Reset to false when drive state changes (disc ejected or inserted).
+  const autoLoaded = useRef(false)
+  // Track the last drive state hash to detect changes (handles same-name discs)
+  const lastDriveHash = useRef('')
+  // Cooldown after failed scans — prevents infinite retry loop
+  const failedCooldownUntil = useRef(0)
 
   const scan = useCallback(async () => {
     setScanning(true)
@@ -112,77 +117,47 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
   }, [])
 
   const loadDiscInfo = useCallback(async (driveIndex: number, forceRefresh = false) => {
-    const { setDiscInfo, setLoading, setSelectedDrive, setTmdbResult, updateDiscSession, drives } = useDiscStore.getState()
+    const { setDiscInfo, setLoading, setSelectedDrive, drives } = useDiscStore.getState()
     setSelectedDrive(driveIndex)
     setLoading(true)
     console.log(`[useDiscDetection] loadDiscInfo(${driveIndex}, forceRefresh=${forceRefresh})`)
 
-    // ── Cache-first: try to load cached DiscInfo by volume name ──
-    const drive = drives.find(d => d.index === driveIndex)
-    if (!forceRefresh && drive?.discTitle) {
-      try {
-        const cached = await window.ztr.disc.getInfoCached(drive.discTitle)
-        if (cached) {
-          console.log(`[useDiscDetection] Cache hit for "${drive.discTitle}" — showing cached info instantly`)
-          setDiscInfo(cached)
-          setLoading(false)
+    // ── Cache disabled: always do a fresh MakeMKV scan ──
+    // Cache was causing stale data when swapping discs in the same set
+    // (same volume name → cache returns disc 1 info for disc 2)
 
-          // Restore TMDB cache if available, otherwise auto-search
-          if (cached._tmdbCache) {
-            const tmdb = cached._tmdbCache
-            setTmdbResult(tmdb)
-            updateDiscSession({
-              kodiTitle: tmdb.title,
-              kodiYear: tmdb.year,
-              kodiTmdbId: tmdb.id,
-              sessionDiscId: cached.discId
-            })
-            if (tmdb.belongs_to_collection) {
-              updateDiscSession({ kodiSetName: tmdb.belongs_to_collection.name })
-            }
-            console.log(`[useDiscDetection] TMDB restored from cache: "${tmdb.title}" (${tmdb.year})`)
-          } else if (cached.title) {
-            autoSearchTmdb(cached.title)
-          }
+    // ── Full MakeMKV scan (single attempt — MakeMKV already has long internal timeouts) ──
+    // No immediate retries: if MakeMKV can't read the disc, retrying instantly
+    // just hammers the drive and confuses it. A 60s cooldown is enforced before
+    // auto-load can try again. The user can always click "Retry Scan" manually.
+    const MAX_RETRIES = 2
+    const RETRY_DELAY_MS = 15000 // 15s between retries — give the drive time to settle
 
-          // Continue with full scan in background to refresh cache
-          window.ztr.disc.getInfo(driveIndex).then((fresh: unknown) => {
-            if (fresh) {
-              console.log('[useDiscDetection] Background refresh complete — updating with fresh info')
-              setDiscInfo(fresh as Parameters<typeof setDiscInfo>[0])
-            }
-          }).catch((err: unknown) => {
-            console.warn('[useDiscDetection] Background refresh failed:', err)
-          })
-          return
-        }
-      } catch (err) {
-        console.warn('[useDiscDetection] Cache lookup failed:', err)
-      }
-    }
-
-    // ── No cache hit: full MakeMKV scan (with retry for TCOUNT:0) ──
-    const MAX_RETRIES = 3
-    const RETRY_DELAY_MS = 5000
-
+    let succeeded = false
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
+        console.log(`[useDiscDetection] getInfo attempt ${attempt}/${MAX_RETRIES} for drive ${driveIndex}`)
         const info = await window.ztr.disc.getInfo(driveIndex)
         console.log(`[useDiscDetection] getInfo result (attempt ${attempt}/${MAX_RETRIES}):`,
           info ? `"${info.title}" (${info.discType}) ${info.trackCount} tracks` : 'null')
 
-        // If MakeMKV returned 0 tracks but we know a disc is present, retry after delay
-        if (info && info.trackCount === 0 && attempt < MAX_RETRIES) {
-          const currentDrives = useDiscStore.getState().drives
-          const driveHasDisc = currentDrives.some(d => d.index === driveIndex && (d.discTitle || d.discType))
-          if (driveHasDisc) {
-            console.warn(`[useDiscDetection] TCOUNT:0 but disc is present — retrying in ${RETRY_DELAY_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`)
-            await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
-            continue
-          }
+        // Retry if scan returned null (timeout/error) or 0 tracks while disc is present
+        const shouldRetry = attempt < MAX_RETRIES && (
+          info === null ||
+          (info.trackCount === 0 && useDiscStore.getState().drives.some(
+            d => d.index === driveIndex && (d.discTitle || d.discType)
+          ))
+        )
+
+        if (shouldRetry) {
+          const reason = info === null ? 'scan failed/timed out' : 'TCOUNT:0 but disc present'
+          console.warn(`[useDiscDetection] ${reason} — retrying in ${RETRY_DELAY_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`)
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+          continue
         }
 
         setDiscInfo(info)
+        succeeded = info !== null && info.trackCount > 0
 
         // Auto-search TMDB after successful disc load
         if (info?.title) {
@@ -199,34 +174,56 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
       }
     }
 
+    // If all retries failed, set a cooldown to prevent infinite retry storm.
+    // autoLoaded stays true — only a disc swap (hash change) or manual Retry resets it.
+    // The cooldown allows ONE more auto-attempt after 60 seconds, in case the drive
+    // just needed time to spin up.
+    if (!succeeded) {
+      const COOLDOWN_MS = 60000
+      failedCooldownUntil.current = Date.now() + COOLDOWN_MS
+      console.warn(`[useDiscDetection] All retries exhausted — cooldown for ${COOLDOWN_MS / 1000}s. Use Retry Scan for manual rescan.`)
+    }
+
     setLoading(false)
   }, [autoSearchTmdb])
 
-  // Helper: check if we should auto-load for the current drive state
+  // Helper: check if we should auto-load for the current drive state.
+  // Uses a hash of the drive flags to detect ANY change (works even when
+  // two discs share the same volume name, e.g. discs in a box set).
   const tryAutoLoad = useCallback(() => {
-    const { discInfo, loading, drives } = useDiscStore.getState()
+    const { loading, drives } = useDiscStore.getState()
     if (loading) return
 
+    // Build a hash of drive state — includes flags, disc title, disc type
+    // When the OS detects a disc change (even same-name swap), at least the
+    // discType or presence flag changes briefly, which resets our tracker.
     const driveWithDisc = drives.find((d) => d.discTitle || d.discType)
-    if (!driveWithDisc) {
-      // Disc was ejected — reset so we auto-load again when a new disc appears
-      if (autoLoadedDiscTitle.current !== null) {
-        console.log('[useDiscDetection] Disc ejected — resetting auto-load tracker')
-        autoLoadedDiscTitle.current = null
+    const currentHash = driveWithDisc
+      ? `${driveWithDisc.index}:${driveWithDisc.discTitle}:${driveWithDisc.discType}:present`
+      : 'empty'
+
+    // Detect drive state change → reset auto-load flag and clear cooldown
+    if (currentHash !== lastDriveHash.current) {
+      const wasEmpty = lastDriveHash.current === '' || lastDriveHash.current === 'empty'
+      lastDriveHash.current = currentHash
+      autoLoaded.current = false
+      failedCooldownUntil.current = 0 // Clear cooldown on disc swap
+      if (!wasEmpty && currentHash === 'empty') {
+        console.log('[useDiscDetection] Disc ejected — ready for next disc')
+        return
       }
+    }
+
+    if (!driveWithDisc) return
+    if (autoLoaded.current) return
+
+    // Respect cooldown after failed scans (prevents infinite retry storm)
+    if (failedCooldownUntil.current > Date.now()) {
       return
     }
 
-    const currentDiscTitle = driveWithDisc.discTitle || driveWithDisc.discType || '__unknown__'
-
-    // Skip if we already auto-loaded this exact disc
-    if (autoLoadedDiscTitle.current === currentDiscTitle) return
-
-    // Skip if discInfo is already loaded for this disc (e.g. loaded by another hook instance)
-    if (discInfo && discInfo.discId === currentDiscTitle) return
-
-    autoLoadedDiscTitle.current = currentDiscTitle
-    console.log(`[useDiscDetection] Auto-loading disc info for drive ${driveWithDisc.index} (disc="${currentDiscTitle}")`)
+    autoLoaded.current = true
+    console.log(`[useDiscDetection] Auto-loading disc info for drive ${driveWithDisc.index} (disc="${driveWithDisc.discTitle || driveWithDisc.discType}")`)
     loadDiscInfo(driveWithDisc.index)
   }, [loadDiscInfo])
 
@@ -270,7 +267,8 @@ export function useDiscDetection(opts: UseDiscDetectionOptions | number = 5000) 
   const rescanDisc = useCallback(async (forceRefresh = false) => {
     const { drives, selectedDrive } = useDiscStore.getState()
     const driveIndex = selectedDrive ?? drives.find(d => d.discTitle || d.discType)?.index ?? 0
-    autoLoadedDiscTitle.current = null // Reset so auto-load can re-trigger
+    autoLoaded.current = false // Reset so auto-load can re-trigger
+    failedCooldownUntil.current = 0 // Clear cooldown — manual retry always works
     console.log(`[useDiscDetection] Manual rescan triggered for drive ${driveIndex} (forceRefresh=${forceRefresh})`)
     await loadDiscInfo(driveIndex, forceRefresh)
   }, [loadDiscInfo])

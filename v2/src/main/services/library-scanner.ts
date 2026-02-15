@@ -137,8 +137,9 @@ export function scanMovieFolder(folderName: string, folderPath: string): Library
 
     if (editions.length === 0) return null
 
-    // Check for Extras folder
-    const hasExtras = existsSync(join(folderPath, 'Extras'))
+    // Check for extras category folders (Plex/Jellyfin convention)
+    const extrasFolders = ['Featurettes', 'Behind The Scenes', 'Deleted Scenes', 'Interviews', 'Scenes', 'Shorts', 'Trailers', 'Other']
+    const hasExtras = extrasFolders.some(f => existsSync(join(folderPath, f)))
 
     // Check for artwork
     const hasPoster = existsSync(join(folderPath, 'poster.jpg'))

@@ -36,8 +36,9 @@ interface DiscInfoCardProps {
 }
 
 export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
-  const { discInfo, loading, tmdbResult } = useDiscStore()
+  const { discInfo, loading, tmdbResult, drives } = useDiscStore()
   const [tmdbKeyMissing, setTmdbKeyMissing] = useState(false)
+  const driveWithDisc = drives.find(d => d.discTitle || d.discType)
 
   useEffect(() => {
     window.ztr.settings.get('kodi.tmdb_api_key').then((val: string) => {
@@ -47,9 +48,37 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
 
   if (loading) {
     return (
-      <Card className="flex items-center justify-center p-8 gap-3">
+      <Card className="flex flex-col items-center justify-center p-8 gap-3">
         <Spinner />
         <span className="text-sm text-zinc-400">Loading disc info...</span>
+        <span className="text-xs text-zinc-600">This may take a minute depending on the disc</span>
+        {onRescan && (
+          <Button variant="ghost" size="sm" className="mt-2" onClick={onRescan}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+            Retry Scan
+          </Button>
+        )}
+      </Card>
+    )
+  }
+
+  if (!discInfo && driveWithDisc) {
+    // Disc is in drive but scan failed or timed out
+    return (
+      <Card className="flex flex-col items-center justify-center p-8 text-center">
+        <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
+        <span className="text-sm text-zinc-300">
+          Disc detected: <span className="font-semibold text-zinc-100">{driveWithDisc.discTitle || 'Unknown'}</span>
+        </span>
+        <span className="text-xs text-zinc-500 mt-1">
+          Scan failed or timed out. Complex discs with many titles may need a longer scan.
+        </span>
+        {onRescan && (
+          <Button variant="primary" size="sm" className="mt-3" onClick={onRescan}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+            Retry Scan
+          </Button>
+        )}
       </Card>
     )
   }

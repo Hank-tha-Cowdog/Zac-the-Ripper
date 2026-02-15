@@ -30,6 +30,9 @@ async function getToolVersion(name: string, path: string): Promise<string | null
       case 'mpv':
         args = ['--version']
         break
+      case 'lsdvd':
+        args = ['-V'] // lsdvd -V prints version
+        break
       default:
         args = ['--version']
     }
@@ -67,6 +70,13 @@ async function getToolVersion(name: string, path: string): Promise<string | null
       if (versionMatch) return versionMatch[1]
     }
 
+    // lsdvd: version line like "lsdvd 0.21 - ..."
+    if (name === 'lsdvd') {
+      const versionMatch = stdout.match(/lsdvd\s+([\d.]+)/)
+      if (versionMatch) return versionMatch[1]
+      return 'installed'
+    }
+
     return stdout.split('\n')[0] || 'installed'
   } catch (err) {
     log.warn(`Could not get version for ${name}: ${err}`)
@@ -75,7 +85,7 @@ async function getToolVersion(name: string, path: string): Promise<string | null
 }
 
 export async function checkTools(): Promise<ToolStatus[]> {
-  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay']
+  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay', 'lsdvd']
   const results: ToolStatus[] = []
 
   for (const tool of tools) {

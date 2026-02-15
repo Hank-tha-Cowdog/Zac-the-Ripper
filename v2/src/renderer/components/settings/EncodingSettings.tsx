@@ -7,9 +7,10 @@ interface EncodingSettingsProps {
 }
 
 export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
-  const codec = settings['encoding.codec'] || 'hevc'
+  const codec = settings['encoding.codec'] || 'h264'
   const hwAccel = settings['encoding.hw_accel'] || 'videotoolbox'
   const isSoftware = hwAccel === 'software'
+  const isVT = hwAccel === 'videotoolbox'
 
   return (
     <Card>
@@ -20,7 +21,7 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
         <div className="flex flex-col gap-1">
           <LabelWithTooltip
             label="Streaming Codec"
-            tooltip="HEVC (H.265) produces ~50% smaller files than H.264 at equivalent quality. All modern devices, Kodi, Plex, and Jellyfin support HEVC. Use H.264 only for legacy device compatibility."
+            tooltip="H.264 is universally compatible with all devices, smart TVs, and streaming clients. HEVC (H.265) produces smaller files but may require transcoding on older devices."
             className="label-tech"
           />
           <div className="relative">
@@ -29,18 +30,18 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
               value={codec}
               onChange={(e) => onSave('encoding.codec', e.target.value)}
             >
-              <option value="hevc">HEVC (H.265) — Recommended</option>
-              <option value="h264">H.264 — Legacy compatibility</option>
+              <option value="h264">H.264 — Universal compatibility</option>
+              <option value="hevc">HEVC (H.265) — Smaller files, modern devices</option>
             </select>
           </div>
         </div>
 
-        {/* HEVC Quality (shown when codec is HEVC) */}
-        {codec === 'hevc' && (
+        {/* VideoToolbox Quality (shown for VT hardware encoding) */}
+        {isVT && (
           <div className="flex flex-col gap-1">
             <LabelWithTooltip
-              label="HEVC Quality"
-              tooltip="VideoToolbox quality scale: 0-100 (higher = better). 95 is near-lossless with excellent compression. 85 is great quality at smaller files. 65 is good for streaming. Only applies to VideoToolbox hardware encoding."
+              label={codec === 'hevc' ? 'HEVC Quality' : 'H.264 Quality'}
+              tooltip="VideoToolbox quality scale: 0-100 (higher = better). 65 is high quality for streaming. 80+ is near-transparent. 95 is near-lossless. Only applies to VideoToolbox hardware encoding."
               className="label-tech"
             />
             <input
@@ -48,15 +49,22 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
               className="input"
               min={0}
               max={100}
-              value={settings['encoding.hevc_quality'] || '95'}
-              onChange={(e) => onSave('encoding.hevc_quality', e.target.value)}
+              value={codec === 'hevc'
+                ? (settings['encoding.hevc_quality'] || '95')
+                : (settings['encoding.h264_vt_quality'] || '65')}
+              onChange={(e) => onSave(
+                codec === 'hevc' ? 'encoding.hevc_quality' : 'encoding.h264_vt_quality',
+                e.target.value
+              )}
             />
-            <span className="text-[10px] text-zinc-600">0-100 scale. 95 = near-lossless. Used with VideoToolbox.</span>
+            <span className="text-[10px] text-zinc-600">
+              0-100 scale. {codec === 'hevc' ? '95 = near-lossless.' : '65 = high quality streaming.'} Used with VideoToolbox.
+            </span>
           </div>
         )}
 
-        {/* H.264 settings (shown when codec is h264 or software mode) */}
-        {(codec === 'h264' || isSoftware) && (
+        {/* Software encoding settings (CRF, preset, maxrate, bufsize) */}
+        {isSoftware && (
           <>
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-1">

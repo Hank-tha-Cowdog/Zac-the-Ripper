@@ -15,15 +15,20 @@ const navItems = [
 
 export function Sidebar() {
   const navigate = useNavigate()
-  const { discInfo, selectedDrive, scanning } = useDiscStore()
+  const { discInfo, drives, selectedDrive, scanning, loading } = useDiscStore()
   const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
+
+  // A disc is present if we have full info OR if drive polling detected one
+  const driveWithDisc = drives.find(d => d.discTitle || d.discType)
+  const hasDisc = !!discInfo || !!driveWithDisc
 
   const handleRefresh = async () => {
     await rescanDisc(true)
   }
 
   const handleEject = async () => {
-    await window.ztr.disc.eject(selectedDrive ?? 0)
+    const driveIndex = selectedDrive ?? driveWithDisc?.index ?? 0
+    await window.ztr.disc.eject(driveIndex)
     useDiscStore.getState().setDiscInfo(null)
     useDiscStore.getState().resetDiscSession()
     navigate('/')
@@ -70,6 +75,22 @@ export function Sidebar() {
               <span className="text-[10px] text-zinc-500">{discInfo.trackCount} titles</span>
             </div>
           </div>
+        ) : loading && driveWithDisc ? (
+          <div className="mt-1.5 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <RefreshCw className="w-3 h-3 text-purple-400 shrink-0 animate-spin" />
+              <span className="text-xs text-zinc-400 truncate">{driveWithDisc.discTitle || 'Scanning...'}</span>
+            </div>
+            <span className="text-[10px] text-zinc-600">Reading disc info...</span>
+          </div>
+        ) : driveWithDisc ? (
+          <div className="mt-1.5 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Disc3 className="w-3 h-3 text-zinc-500 shrink-0" />
+              <span className="text-xs text-zinc-400 truncate">{driveWithDisc.discTitle || 'Disc detected'}</span>
+            </div>
+            <span className="text-[10px] text-zinc-600">Tap Refresh to scan</span>
+          </div>
         ) : (
           <div className="mt-1.5 text-[10px] text-zinc-600">No disc detected</div>
         )}
@@ -86,7 +107,7 @@ export function Sidebar() {
           <button
             className="btn-ghost flex-1 flex items-center justify-center gap-1 text-xs py-1"
             onClick={handleEject}
-            disabled={!discInfo}
+            disabled={!hasDisc}
           >
             <ArrowUpFromLine className="w-3 h-3" />
             Eject

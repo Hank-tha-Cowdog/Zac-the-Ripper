@@ -141,7 +141,7 @@ export class KodiOutputService {
     const outputDir = join(libraryPath, 'Movies', folderName)
 
     if (isExtrasDisc) {
-      const extrasDir = join(outputDir, 'Extras')
+      const extrasDir = join(outputDir, 'Featurettes')
       const fileName = edition ? `${edition}.mkv` : 'Extras.mkv'
       return { outputDir: extrasDir, videoPath: join(extrasDir, fileName) }
     }
@@ -154,7 +154,7 @@ export class KodiOutputService {
   }
 
   /**
-   * Write NFO, copy artwork, and create Extras/ folder.
+   * Write NFO, copy artwork, and create category folders.
    * Called AFTER the video file has been written to videoPath by FFmpeg.
    */
   finalizeMovie(params: KodiMovieParams & { videoAlreadyAtPath: string; soundVersion?: string; totalDiscs?: number }): { nfoPath: string } {
@@ -210,15 +210,15 @@ export class KodiOutputService {
 
     const ext = extname(sourceFile) || '.mkv'
 
-    // Extras disc: route to Extras/ subfolder with descriptive name
+    // Extras disc: route to Featurettes/ subfolder (Plex + Jellyfin convention)
     if (isExtrasDisc) {
-      const extrasDir = join(outputDir, 'Extras')
-      mkdirSync(extrasDir, { recursive: true })
+      const featurettesDir = join(outputDir, 'Featurettes')
+      mkdirSync(featurettesDir, { recursive: true })
       const extrasName = edition ? `${edition}${ext}` : `Extras${ext}`
-      const moviePath = join(extrasDir, extrasName)
+      const moviePath = join(featurettesDir, extrasName)
       copyFileSync(sourceFile, moviePath)
-      log.info(`Exported extras disc to: ${extrasDir}`)
-      return { outputDir: extrasDir, nfoPath: '', moviePath }
+      log.info(`Exported extras disc to: ${featurettesDir}`)
+      return { outputDir: featurettesDir, nfoPath: '', moviePath }
     }
 
     // Build filename: "Title (Year) {edition-Director's Cut} - DTS-HD Master Audio - disc2.mkv"

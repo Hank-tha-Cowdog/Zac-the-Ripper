@@ -56,6 +56,11 @@ export function getDefaultToolPaths(): Record<string, string[]> {
           '/opt/homebrew/bin/ffplay',
           '/usr/local/bin/ffplay',
           '/usr/bin/ffplay'
+        ],
+        lsdvd: [
+          '/opt/homebrew/bin/lsdvd',
+          '/usr/local/bin/lsdvd',
+          '/usr/bin/lsdvd'
         ]
       }
     case 'linux':
@@ -64,7 +69,8 @@ export function getDefaultToolPaths(): Record<string, string[]> {
         ffmpeg: ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'],
         ffprobe: ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe'],
         mpv: ['/usr/bin/mpv', '/usr/local/bin/mpv'],
-        ffplay: ['/usr/bin/ffplay', '/usr/local/bin/ffplay']
+        ffplay: ['/usr/bin/ffplay', '/usr/local/bin/ffplay'],
+        lsdvd: ['/usr/bin/lsdvd', '/usr/local/bin/lsdvd']
       }
     case 'windows':
       return {
