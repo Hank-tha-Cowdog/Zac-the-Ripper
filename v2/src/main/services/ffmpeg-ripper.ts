@@ -254,18 +254,44 @@ export class FFmpegRipperService {
       log.info(`[ffmpeg-rip] ${unmapped.length} track(s) need heuristic VTS matching`)
       const vtsDurations = await this.probeVTSDurations(videoTsDir)
 
+      // Log all VTS durations for debugging
+      for (const [vts, dur] of vtsDurations) {
+        log.info(`[ffmpeg-rip] VTS ${vts} probed duration: ${dur.toFixed(1)}s`)
+      }
+
       for (const track of unmapped) {
-        const tolerance = 5 // seconds
+        // Use percentage-based tolerance: 15% of track duration or 30s, whichever is larger.
+        // DVD concat durations often differ from MakeMKV's program-chain durations due to
+        // cell reordering, multi-angle segments, and layer breaks.
+        const tolerance = Math.max(track.durationSeconds * 0.15, 30)
+        let bestMatch: { vts: number; diff: number } | null = null
+
         for (const [vts, duration] of vtsDurations) {
-          if (Math.abs(duration - track.durationSeconds) <= tolerance) {
-            result.set(track.id, vts)
-            log.info(`[ffmpeg-rip] Heuristic match: title ${track.id} (${track.durationSeconds}s) → VTS ${vts} (${duration.toFixed(1)}s)`)
-            break
+          const diff = Math.abs(duration - track.durationSeconds)
+          if (diff <= tolerance && (!bestMatch || diff < bestMatch.diff)) {
+            bestMatch = { vts, diff }
           }
         }
 
-        if (!result.has(track.id)) {
-          log.warn(`[ffmpeg-rip] No VTS duration match for title ${track.id} (${track.durationSeconds}s)`)
+        if (bestMatch) {
+          result.set(track.id, bestMatch.vts)
+          const vtsDur = vtsDurations.get(bestMatch.vts)!
+          log.info(`[ffmpeg-rip] Heuristic match: title ${track.id} (${track.durationSeconds}s) → VTS ${bestMatch.vts} (${vtsDur.toFixed(1)}s, diff=${bestMatch.diff.toFixed(1)}s)`)
+        } else {
+          log.warn(`[ffmpeg-rip] No VTS duration match for title ${track.id} (${track.durationSeconds}s, tolerance=${tolerance.toFixed(0)}s)`)
+        }
+      }
+
+      // Fallback: if still unmapped and only one track is selected, use the largest VTS.
+      // The main feature is almost always the VTS with the most VOB data.
+      const stillUnmapped = unmapped.filter(t => !result.has(t.id))
+      if (stillUnmapped.length > 0 && vtsDurations.size > 0) {
+        const largestVts = this.findLargestVTS(videoTsDir, vtsDurations)
+        if (largestVts !== null) {
+          for (const track of stillUnmapped) {
+            result.set(track.id, largestVts.vts)
+            log.info(`[ffmpeg-rip] Largest-VTS fallback: title ${track.id} (${track.durationSeconds}s) → VTS ${largestVts.vts} (${largestVts.sizeMB.toFixed(0)} MB, ${vtsDurations.get(largestVts.vts)?.toFixed(1)}s)`)
+          }
         }
       }
     }
@@ -310,7 +336,7 @@ export class FFmpegRipperService {
         const duration = parseFloat(stdout.trim())
         if (!isNaN(duration) && duration > 0) {
           durations.set(vtsNumber, duration)
-          log.debug(`[ffmpeg-rip] VTS ${vtsNumber}: ${duration.toFixed(1)}s (${allParts.length} parts)`)
+          log.info(`[ffmpeg-rip] VTS ${vtsNumber}: ${duration.toFixed(1)}s (${allParts.length} parts)`)
         }
       } catch (err) {
         log.debug(`[ffmpeg-rip] Could not probe VTS ${vtsNumber}: ${err}`)
@@ -318,6 +344,29 @@ export class FFmpegRipperService {
     }
 
     return durations
+  }
+
+  /**
+   * Find the VTS with the largest total VOB file size.
+   * Used as a last-resort fallback when duration matching fails — the main
+   * feature is almost always the VTS with the most data.
+   */
+  private findLargestVTS(videoTsDir: string, vtsDurations: Map<number, number>): { vts: number; sizeMB: number } | null {
+    let largest: { vts: number; sizeMB: number } | null = null
+
+    for (const [vts] of vtsDurations) {
+      const vobFiles = this.findVOBFiles(videoTsDir, vts)
+      const totalSize = vobFiles.reduce((sum, f) => {
+        try { return sum + statSync(f).size } catch { return sum }
+      }, 0)
+      const sizeMB = totalSize / (1024 * 1024)
+
+      if (!largest || sizeMB > largest.sizeMB) {
+        largest = { vts, sizeMB }
+      }
+    }
+
+    return largest
   }
 
   // ─── FFmpeg VOB → MKV ripping ──────────────────────────────────────
