@@ -1,14 +1,18 @@
 import { BrowserWindow } from 'electron'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import { tmpdir, homedir } from 'os'
 import { join, dirname } from 'path'
-import { mkdirSync, rmSync, copyFileSync } from 'fs'
+import { mkdirSync, rmSync, copyFileSync, existsSync } from 'fs'
 import { MakeMKVService } from './makemkv'
 import { FFmpegService } from './ffmpeg'
 import { FFmpegRipperService } from './ffmpeg-ripper'
 import { FFprobeService } from './ffprobe'
 import { KodiOutputService, EXTRAS_FOLDER_MAP } from './kodi-output'
 import { TMDBService } from './tmdb'
+import { CDRipperService } from './cd-ripper'
+import { MusicBrainzService } from './musicbrainz'
 import type { DiscInfo } from './disc-detection'
 import type { ReadError } from './makemkv'
 import * as jobQueries from '../database/queries/jobs'
@@ -46,6 +50,8 @@ export class JobQueueService {
   private ffprobeService = new FFprobeService()
   private kodiService = new KodiOutputService()
   private tmdbService = new TMDBService()
+  private cdRipperService = new CDRipperService()
+  private musicBrainzService = new MusicBrainzService()
   private processing = false
 
   static getInstance(): JobQueueService {
@@ -967,6 +973,290 @@ export class JobQueueService {
     }
   }
 
+  async createMusicRipJob(params: {
+    trackNumbers: number[]
+    artist: string
+    albumArtist: string
+    album: string
+    year: string
+    discNumber: number
+    totalDiscs: number
+    tracks: Array<{ number: number; title: string; artist: string }>
+    mbReleaseId: string | null
+    isVariousArtists: boolean
+    coverArtPath: string | null
+    devicePath?: string
+    window: BrowserWindow
+  }): Promise<{ jobId: string; dbId: number }> {
+    const { tracks, window } = params
+    const outputDir = expandPath(getSetting('paths.music_output') || '~/Music/Zac the Ripper')
+
+    const disc = discQueries.createDisc({
+      title: `${params.artist} - ${params.album}`,
+      disc_type: 'AUDIO_CD',
+      disc_id: params.mbReleaseId || undefined,
+      track_count: tracks.length,
+      metadata: JSON.stringify({
+        artist: params.artist,
+        album: params.album,
+        year: params.year,
+        musicbrainzReleaseId: params.mbReleaseId
+      })
+    })
+
+    const job = jobQueries.createJob({
+      disc_id: disc.id,
+      job_type: 'music_export',
+      output_path: outputDir,
+      movie_title: `${params.artist} - ${params.album}`
+    })
+
+    const jobId = randomUUID()
+    this.queue.push({ id: jobId, dbId: job.id, type: 'music_export', status: 'pending' })
+
+    log.info(`[music] Created music_export job ${jobId} — ${params.artist} - ${params.album}`)
+
+    this.executeMusicPipeline(jobId, job.id, { ...params, outputDir })
+
+    return { jobId, dbId: job.id }
+  }
+
+  /**
+   * Music CD ripping pipeline:
+   *   Phase 1 (0-50%): Rip tracks to WAV via cdparanoia
+   *   Phase 2 (50-90%): Encode WAV to FLAC via ffmpeg with metadata tags
+   *   Phase 3 (90-100%): Organize into Navidrome folder structure
+   */
+  private async executeMusicPipeline(jobId: string, dbId: number, params: {
+    trackNumbers: number[]
+    artist: string
+    albumArtist: string
+    album: string
+    year: string
+    discNumber: number
+    totalDiscs: number
+    tracks: Array<{ number: number; title: string; artist: string }>
+    mbReleaseId: string | null
+    isVariousArtists: boolean
+    coverArtPath: string | null
+    devicePath?: string
+    outputDir: string
+    window: BrowserWindow
+  }): Promise<void> {
+    const { trackNumbers, artist, albumArtist, album, year, discNumber, totalDiscs,
+            tracks, mbReleaseId, coverArtPath, devicePath, outputDir, window } = params
+
+    jobQueries.updateJobStatus(dbId, 'running')
+    this.updateQueueItem(jobId, 'running')
+
+    const stagingDir = join(tmpdir(), `ztr_music_${jobId.slice(0, 8)}`)
+    mkdirSync(stagingDir, { recursive: true })
+    log.info(`[music] Staging dir: ${stagingDir}`)
+
+    const sendProgress = (pct: number, message: string) => {
+      window.webContents.send(IPC.AUDIO_PROGRESS, { jobId, percentage: pct, message })
+      window.webContents.send(IPC.RIP_PROGRESS, { jobId, percentage: pct, message })
+    }
+
+    try {
+      // ── Phase 1: Rip tracks to WAV (0-50%) ──────────────────────
+      sendProgress(0, 'Phase 1/3 — Ripping audio tracks...')
+      getDiscDetectionService().rippingInProgress = true
+
+      // Download cover art concurrently if available
+      let localCoverPath = coverArtPath
+      const coverPromise = (async () => {
+        if (mbReleaseId && !localCoverPath) {
+          try {
+            const dest = join(stagingDir, 'cover.jpg')
+            const result = await this.musicBrainzService.downloadCoverArt(mbReleaseId, dest)
+            if (result.success) {
+              localCoverPath = dest
+              log.info(`[music] Cover art downloaded: ${dest}`)
+            }
+          } catch (err) {
+            log.warn(`[music] Cover art download failed (non-fatal): ${err}`)
+          }
+        }
+      })()
+
+      const ripResult = await this.cdRipperService.ripAllTracks({
+        jobId,
+        trackNumbers,
+        outputDir: stagingDir,
+        devicePath,
+        onProgress: (pct, message) => {
+          sendProgress(pct * 0.5, `Phase 1/3 — ${message}`)
+        }
+      })
+
+      getDiscDetectionService().rippingInProgress = false
+
+      if (!ripResult.success) {
+        throw new Error(ripResult.error || 'CD ripping failed')
+      }
+
+      log.info(`[music] Phase 1 complete — ${ripResult.outputFiles.length} WAV files`)
+
+      // ── Phase 2: Encode WAV to FLAC (50-90%) ───────────────────
+      sendProgress(50, 'Phase 2/3 — Encoding to FLAC...')
+      await coverPromise // Ensure cover art download is done
+
+      const compressionLevel = getSetting('audio.flac_compression') || '8'
+      const embedCoverArt = getSetting('audio.embed_cover_art') !== 'false'
+      const flacFiles: string[] = []
+      const ffmpegPath = this.ffmpegService.getPath()
+      const totalTracks = tracks.length
+      const execFileAsync = promisify(execFile)
+
+      for (let i = 0; i < ripResult.outputFiles.length; i++) {
+        const wavPath = ripResult.outputFiles[i]
+        const trackInfo = tracks[i]
+        if (!trackInfo) continue
+
+        const flacPath = join(stagingDir, `${String(trackInfo.number).padStart(2, '0')}.flac`)
+        const trackPct = (i / totalTracks)
+        sendProgress(50 + trackPct * 40, `Phase 2/3 — Encoding FLAC ${i + 1}/${totalTracks}`)
+
+        // Build ffmpeg args for FLAC encoding with metadata
+        const args: string[] = ['-y']
+
+        // Input: WAV file
+        args.push('-i', wavPath)
+
+        // If embedding cover art
+        if (embedCoverArt && localCoverPath && existsSync(localCoverPath)) {
+          args.push('-i', localCoverPath)
+          args.push('-map', '0:a', '-map', '1:v')
+          args.push('-c:v', 'copy', '-disposition:v', 'attached_pic')
+        }
+
+        // FLAC codec
+        args.push('-c:a', 'flac')
+        args.push('-compression_level', compressionLevel)
+
+        // Metadata tags
+        args.push('-metadata', `title=${trackInfo.title}`)
+        args.push('-metadata', `artist=${trackInfo.artist}`)
+        args.push('-metadata', `album=${album}`)
+        args.push('-metadata', `albumartist=${albumArtist}`)
+        args.push('-metadata', `track=${trackInfo.number}/${totalTracks}`)
+        args.push('-metadata', `date=${year}`)
+        if (totalDiscs > 1) {
+          args.push('-metadata', `disc=${discNumber}/${totalDiscs}`)
+        }
+
+        args.push(flacPath)
+
+        // Run ffmpeg directly (not via encode() which adds its own -i and output args)
+        try {
+          await execFileAsync(ffmpegPath, args, { timeout: 120000 })
+          flacFiles.push(flacPath)
+          log.info(`[music] FLAC encoded: track ${trackInfo.number} "${trackInfo.title}"`)
+        } catch (err) {
+          log.warn(`[music] FLAC encode failed for track ${trackInfo.number}: ${err}`)
+        }
+      }
+
+      if (flacFiles.length === 0) {
+        throw new Error('No FLAC files were successfully encoded')
+      }
+
+      // ── Phase 3: Organize output (90-100%) ─────────────────────
+      sendProgress(90, 'Phase 3/3 — Organizing files...')
+
+      // Build Navidrome folder: Artist/Album (Year)/
+      const safeArtist = this.sanitizeFilename(albumArtist || artist)
+      const safeAlbum = this.sanitizeFilename(album)
+      let albumFolder = year ? `${safeAlbum} (${year})` : safeAlbum
+      if (totalDiscs > 1) {
+        albumFolder += ` (Disc ${discNumber})`
+      }
+
+      const finalDir = join(outputDir, safeArtist, albumFolder)
+      mkdirSync(finalDir, { recursive: true })
+      log.info(`[music] Output dir: ${finalDir}`)
+
+      // Move FLAC files with proper naming: "01 - Track Title.flac"
+      const finalOutputFiles: string[] = []
+      for (let i = 0; i < flacFiles.length; i++) {
+        const trackInfo = tracks[i]
+        if (!trackInfo) continue
+
+        const safeTitle = this.sanitizeFilename(trackInfo.title)
+        const filename = `${String(trackInfo.number).padStart(2, '0')} - ${safeTitle}.flac`
+        const finalPath = join(finalDir, filename)
+
+        try {
+          copyFileSync(flacFiles[i], finalPath)
+          finalOutputFiles.push(finalPath)
+        } catch (err) {
+          log.warn(`[music] Failed to copy ${flacFiles[i]} → ${finalPath}: ${err}`)
+        }
+      }
+
+      // Copy cover art as folder.jpg
+      if (localCoverPath && existsSync(localCoverPath)) {
+        try {
+          copyFileSync(localCoverPath, join(finalDir, 'folder.jpg'))
+          log.info(`[music] Cover art copied: folder.jpg`)
+        } catch (err) {
+          log.warn(`[music] Cover art copy failed: ${err}`)
+        }
+      }
+
+      // Clean up staging
+      try {
+        rmSync(stagingDir, { recursive: true, force: true })
+        log.info(`[music] Staging dir cleaned up`)
+      } catch {}
+
+      // Record output files
+      for (const filePath of finalOutputFiles) {
+        outputFileQueries.createOutputFile({
+          job_id: dbId,
+          file_path: filePath,
+          format: 'flac',
+          audio_codec: 'flac'
+        })
+      }
+
+      // Done
+      sendProgress(100, 'Complete')
+      jobQueries.updateJobStatus(dbId, 'completed')
+      this.updateQueueItem(jobId, 'completed')
+
+      const displayTitle = `${artist} - ${album}`
+      window.webContents.send(IPC.AUDIO_COMPLETE, {
+        jobId,
+        outputFiles: finalOutputFiles,
+        outputDir: finalDir
+      })
+      window.webContents.send(IPC.RIP_COMPLETE, {
+        jobId,
+        outputFiles: finalOutputFiles
+      })
+      notifyJobComplete(displayTitle, finalDir).catch(() => {})
+
+      log.info(`[music] Pipeline complete — ${finalOutputFiles.length} FLAC files in ${finalDir}`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      log.error(`[music] Pipeline failed: ${msg}`)
+      getDiscDetectionService().rippingInProgress = false
+      jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
+      this.updateQueueItem(jobId, 'failed')
+      window.webContents.send(IPC.AUDIO_ERROR, { jobId, error: msg })
+      window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      notifyJobFailed(`${params.artist} - ${params.album}`, msg).catch(() => {})
+
+      try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}
+    }
+  }
+
+  private sanitizeFilename(name: string): string {
+    return name.replace(/[<>:"/\\|?*]/g, '_').replace(/\.+$/, '').trim() || 'Unknown'
+  }
+
   cancelJob(jobId: string): boolean {
     const item = this.queue.find(q => q.id === jobId)
     if (!item) return false
@@ -974,6 +1264,7 @@ export class JobQueueService {
     if (item.status === 'running') {
       this.ffmpegService.cancelJob(jobId)
       this.ffmpegRipperService.cancelJob(jobId)
+      this.cdRipperService.cancelJob(jobId)
       jobQueries.updateJobStatus(item.dbId, 'cancelled')
       this.updateQueueItem(jobId, 'cancelled')
     } else if (item.status === 'pending') {

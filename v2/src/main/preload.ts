@@ -136,6 +136,35 @@ const api = {
     test: () => ipcRenderer.invoke(IPC.NOTIFY_TEST)
   },
 
+  // Audio CD operations
+  audio: {
+    rip: (params: unknown) => ipcRenderer.invoke(IPC.AUDIO_RIP, params),
+    cancel: (jobId: string) => ipcRenderer.invoke(IPC.AUDIO_CANCEL, jobId),
+    onProgress: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.AUDIO_PROGRESS, handler)
+      return () => ipcRenderer.removeListener(IPC.AUDIO_PROGRESS, handler)
+    },
+    onComplete: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.AUDIO_COMPLETE, handler)
+      return () => ipcRenderer.removeListener(IPC.AUDIO_COMPLETE, handler)
+    },
+    onError: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.AUDIO_ERROR, handler)
+      return () => ipcRenderer.removeListener(IPC.AUDIO_ERROR, handler)
+    }
+  },
+
+  // MusicBrainz
+  musicbrainz: {
+    lookup: (discId: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_LOOKUP, discId),
+    search: (query: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_SEARCH, query),
+    downloadCoverArt: (releaseId: string, destPath: string) =>
+      ipcRenderer.invoke(IPC.MUSICBRAINZ_COVER_ART, releaseId, destPath)
+  },
+
   // App info
   app: {
     getVersion: () => ipcRenderer.invoke(IPC.APP_GET_VERSION),

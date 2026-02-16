@@ -10,6 +10,7 @@ import { registerAppHandlers } from './app-handlers'
 import { registerLibraryHandlers } from './library-handlers'
 import { registerNotifyHandlers } from './notify-handlers'
 import { registerPreviewHandlers } from './preview-handlers'
+import { registerAudioHandlers } from './audio-handlers'
 
 export function registerAllIpcHandlers(): void {
   registerDiscHandlers()
@@ -24,4 +25,5 @@ export function registerAllIpcHandlers(): void {
   registerLibraryHandlers()
   registerNotifyHandlers()
   registerPreviewHandlers()
+  registerAudioHandlers()
 }

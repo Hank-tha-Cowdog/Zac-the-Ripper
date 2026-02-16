@@ -3,10 +3,10 @@
 export const APP_NAME = 'Zac the Ripper'
 export const APP_VERSION = '2.0.0'
 
-export const DISC_TYPES = ['DVD', 'BD', 'UHD_BD'] as const
+export const DISC_TYPES = ['DVD', 'BD', 'UHD_BD', 'AUDIO_CD'] as const
 export type DiscType = (typeof DISC_TYPES)[number]
 
-export const JOB_TYPES = ['mkv_rip', 'raw_capture', 'ffv1_encode', 'h264_encode', 'hevc_encode', 'kodi_export', 'jellyfin_export'] as const
+export const JOB_TYPES = ['mkv_rip', 'raw_capture', 'ffv1_encode', 'h264_encode', 'hevc_encode', 'kodi_export', 'jellyfin_export', 'plex_export', 'music_export'] as const
 export type JobType = (typeof JOB_TYPES)[number]
 
 export const JOB_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled'] as const
@@ -15,7 +15,7 @@ export type JobStatus = (typeof JOB_STATUSES)[number]
 export const MEDIA_TYPES = ['movie', 'tvshow'] as const
 export type MediaType = (typeof MEDIA_TYPES)[number]
 
-export const SETTING_CATEGORIES = ['general', 'encoding', 'kodi', 'jellyfin', 'plex', 'notifications', 'paths', 'tools', 'rip'] as const
+export const SETTING_CATEGORIES = ['general', 'encoding', 'kodi', 'jellyfin', 'plex', 'notifications', 'paths', 'tools', 'rip', 'audio'] as const
 export type SettingCategory = (typeof SETTING_CATEGORIES)[number]
 
 export const CODEC_OPTIONS = ['hevc', 'h264'] as const
@@ -108,15 +108,23 @@ export const DEFAULT_SETTINGS: Record<string, { value: string; category: string 
   'notifications.on_failure': { value: 'true', category: 'notifications' },
 
   // Paths
+  'paths.music_output': { value: '~/Music/Zac the Ripper', category: 'paths' },
   'paths.mkv_output': { value: '~/Movies/Zac the Ripper/MKV', category: 'paths' },
   'paths.raw_output': { value: '~/Movies/Zac the Ripper/Raw', category: 'paths' },
   'paths.ffv1_output': { value: '~/Movies/Zac the Ripper/FFV1', category: 'paths' },
   'paths.streaming_output': { value: '~/Movies/Zac the Ripper/Streaming', category: 'paths' },
 
+  // Audio
+  'audio.format': { value: 'flac', category: 'audio' },
+  'audio.flac_compression': { value: '8', category: 'audio' },
+  'audio.embed_cover_art': { value: 'true', category: 'audio' },
+  'audio.musicbrainz_auto_lookup': { value: 'true', category: 'audio' },
+
   // Tools
   'tools.makemkvcon_path': { value: '/usr/local/bin/makemkvcon', category: 'tools' },
   'tools.ffmpeg_path': { value: '/usr/local/bin/ffmpeg', category: 'tools' },
   'tools.ffprobe_path': { value: '/usr/local/bin/ffprobe', category: 'tools' },
+  'tools.cdparanoia_path': { value: '', category: 'tools' },
 
   // Rip session (persists across discs)
   'rip.kodi_media_type': { value: 'movie', category: 'rip' },
