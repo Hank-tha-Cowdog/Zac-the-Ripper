@@ -260,10 +260,9 @@ export class FFmpegRipperService {
       }
 
       for (const track of unmapped) {
-        // Use percentage-based tolerance: 15% of track duration or 30s, whichever is larger.
-        // DVD concat durations often differ from MakeMKV's program-chain durations due to
-        // cell reordering, multi-angle segments, and layer breaks.
-        const tolerance = Math.max(track.durationSeconds * 0.15, 30)
+        // 30s tolerance covers normal concat-vs-program-chain drift.
+        // If this isn't enough, the largest-VTS fallback below handles it.
+        const tolerance = 30
         let bestMatch: { vts: number; diff: number } | null = null
 
         for (const [vts, duration] of vtsDurations) {
