@@ -15,8 +15,9 @@ interface TestResult {
 
 const toolTooltips: Record<string, string> = {
   makemkvcon: 'MakeMKV command-line tool for disc ripping. Required for extracting titles from DVD/Blu-ray/UHD discs. Download from makemkv.com. Leave blank to auto-detect.',
-  ffmpeg: 'FFmpeg is used for all re-encoding operations (FFV1 archival, HEVC/H.264 streaming). Also handles subtitle extraction and format conversion. Bundled with the app, or install via Homebrew: brew install ffmpeg',
-  ffprobe: 'FFprobe analyzes media files to detect resolution, framerate, interlacing, HDR, audio codecs, and subtitle tracks. Bundled with the app, or installed alongside FFmpeg.'
+  ffmpeg: 'FFmpeg is used for all re-encoding operations (FFV1 archival, HEVC/H.264 streaming, FLAC encoding). Also handles subtitle extraction and format conversion. Bundled with the app, or install via Homebrew: brew install ffmpeg',
+  ffprobe: 'FFprobe analyzes media files to detect resolution, framerate, interlacing, HDR, audio codecs, and subtitle tracks. Bundled with the app, or installed alongside FFmpeg.',
+  cdparanoia: 'cdparanoia rips audio CDs to WAV with error correction. Required for audio CD ripping. Install via Homebrew: brew install cdparanoia'
 }
 
 export function ToolPathSettings({ settings, onSave }: ToolPathSettingsProps) {
@@ -26,7 +27,8 @@ export function ToolPathSettings({ settings, onSave }: ToolPathSettingsProps) {
   const tools = [
     { key: 'tools.makemkvcon_path', label: 'MakeMKV (makemkvcon)', name: 'makemkvcon' },
     { key: 'tools.ffmpeg_path', label: 'FFmpeg', name: 'ffmpeg' },
-    { key: 'tools.ffprobe_path', label: 'FFprobe', name: 'ffprobe' }
+    { key: 'tools.ffprobe_path', label: 'FFprobe', name: 'ffprobe' },
+    { key: 'tools.cdparanoia_path', label: 'cdparanoia', name: 'cdparanoia' }
   ]
 
   const testTool = async (name: string, path: string) => {

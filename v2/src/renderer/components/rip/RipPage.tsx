@@ -1,10 +1,11 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DiscInfoCard } from './DiscInfoCard'
 import { TrackSelector } from './TrackSelector'
 import { RipModesPanel } from './RipModesPanel'
 import { RipActionBar } from './RipActionBar'
 import { KodiOptionsPanel } from './KodiOptionsPanel'
+import { AudioConfigPanel } from './AudioConfigPanel'
 import type { LibrarySelection } from './LibraryBrowser'
 import { useDiscStore } from '../../stores/disc-store'
 import { useJobsStore } from '../../stores/jobs-store'
@@ -13,10 +14,25 @@ import { useDiscDetection } from '../../hooks/useDiscDetection'
 
 export function RipPage() {
   const navigate = useNavigate()
-  const { discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession, trackCategories, trackNames } = useDiscStore()
+  const { discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession, discSession, trackCategories, trackNames } = useDiscStore()
   const { addJob } = useJobsStore()
   const [isRipping, setIsRipping] = useState(false)
   const [standbyMessage, setStandbyMessage] = useState<string | null>(null)
+  const [musicOutputPath, setMusicOutputPath] = useState('')
+
+  const isAudioCD = discInfo?.discType === 'AUDIO_CD'
+
+  // Load music output path from settings
+  useEffect(() => {
+    window.ztr.settings.get('paths.music_output').then((val: string) => {
+      setMusicOutputPath(val || '~/Music/Zac the Ripper')
+    })
+  }, [])
+
+  const handleMusicOutputPathChange = (path: string) => {
+    setMusicOutputPath(path)
+    window.ztr.settings.set('paths.music_output', path)
+  }
 
   // Manual rescan only — global disc detection in App.tsx handles polling + auto-load
   const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
@@ -92,8 +108,67 @@ export function RipPage() {
     }
   }
 
+  const handleAudioRip = async () => {
+    if (selectedTracks.length === 0) return
+
+    setIsRipping(true)
+    setStandbyMessage('Standby — preparing to rip audio CD')
+
+    const { musicArtist, musicAlbumArtist, musicAlbum, musicYear,
+            musicDiscNumber, musicTotalDiscs, musicTracks,
+            musicMbReleaseId, musicIsVariousArtists, musicCoverArtPath } = discSession
+
+    // Map selected track IDs (0-based) back to 1-based track numbers
+    const trackNumbers = selectedTracks.map(id => id + 1)
+
+    // Filter music tracks to only selected ones, preserving order
+    const selectedMusicTracks = trackNumbers.map(num => {
+      const mt = musicTracks.find(t => t.number === num)
+      return mt || { number: num, title: `Track ${num}`, artist: musicArtist }
+    })
+
+    try {
+      const result = await window.ztr.audio.rip({
+        trackNumbers,
+        artist: musicArtist || musicAlbumArtist || 'Unknown Artist',
+        albumArtist: musicAlbumArtist || musicArtist || 'Unknown Artist',
+        album: musicAlbum || 'Unknown Album',
+        year: musicYear || '',
+        discNumber: musicDiscNumber || 1,
+        totalDiscs: musicTotalDiscs || 1,
+        tracks: selectedMusicTracks,
+        mbReleaseId: musicMbReleaseId,
+        isVariousArtists: musicIsVariousArtists,
+        coverArtPath: musicCoverArtPath,
+        devicePath: discInfo?.metadata?.devicePath
+      })
+
+      if (result?.jobId) {
+        addJob({
+          jobId: result.jobId,
+          dbId: result.dbId,
+          type: 'music_export',
+          status: 'running',
+          percentage: 0,
+          message: 'Preparing audio rip...',
+          movieTitle: `${musicArtist || 'Unknown'} - ${musicAlbum || 'Unknown'}`
+        })
+        setTimeout(() => navigate('/progress'), 1500)
+      }
+    } catch (err) {
+      console.error('Audio rip failed:', err)
+      setIsRipping(false)
+      setStandbyMessage(null)
+    }
+  }
+
   const handleRip = async () => {
     if (selectedDrive === null || selectedTracks.length === 0) return
+
+    // Delegate to audio rip for audio CDs
+    if (isAudioCD) {
+      return handleAudioRip()
+    }
 
     setIsRipping(true)
     setStandbyMessage('Standby — your disc drive is coming up to speed')
@@ -179,12 +254,19 @@ export function RipPage() {
         <div className="col-span-2 space-y-4">
           <DiscInfoCard onRescan={rescanDisc} />
           <TrackSelector
-            isLibraryMode={modes.kodi_export || modes.jellyfin_export || modes.plex_export}
-            movieTitle={kodiTitle}
+            isLibraryMode={!isAudioCD && (modes.kodi_export || modes.jellyfin_export || modes.plex_export)}
+            movieTitle={isAudioCD ? discSession.musicAlbum : kodiTitle}
           />
         </div>
 
         <div className="space-y-4">
+          {isAudioCD ? (
+            <AudioConfigPanel
+              musicOutputPath={musicOutputPath}
+              onMusicOutputPathChange={handleMusicOutputPathChange}
+            />
+          ) : (
+            <>
           <RipModesPanel
             modes={modes}
             onModesChange={setModes}
@@ -246,6 +328,8 @@ export function RipPage() {
               convertSubsToSrt={convertSubsToSrt}
               onConvertSubsToSrtChange={setConvertSubsToSrt}
             />
+          )}
+            </>
           )}
         </div>
       </div>

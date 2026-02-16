@@ -5,6 +5,8 @@ import { runProcess } from '../util/process-runner'
 import { getSetting } from '../database/queries/settings'
 import { createLogger } from '../util/logger'
 import { findToolPath, getPlatform } from '../util/platform'
+import { CDRipperService, type CDDiscInfo } from './cd-ripper'
+import { MusicBrainzService } from './musicbrainz'
 
 const execFileAsync = promisify(execFile)
 const execAsync = promisify(exec)
@@ -20,12 +22,13 @@ export interface DriveInfo {
 
 export interface DiscInfo {
   title: string
-  discType: 'DVD' | 'BD' | 'UHD_BD'
+  discType: 'DVD' | 'BD' | 'UHD_BD' | 'AUDIO_CD'
   discId: string
   fingerprint: string
   trackCount: number
   tracks: TrackInfo[]
   metadata: Record<string, string>
+  cdToc?: CDDiscInfo
 }
 
 export interface TrackInfo {
@@ -72,6 +75,9 @@ export class DiscDetectionService {
   private scanProcess: ReturnType<typeof runProcess> | null = null
   // Ripping guard: when a MakeMKV rip/backup is active, skip disc polling
   private _rippingInProgress = false
+  // Audio CD services
+  private cdRipperService = new CDRipperService()
+  private musicBrainzService = new MusicBrainzService()
 
   get rippingInProgress(): boolean {
     return this._rippingInProgress
@@ -404,6 +410,11 @@ export class DiscDetectionService {
     this.fullScanInProgress = true
     log.info(`getDiscInfo(${discIndex}) — acquiring scan lock`)
     try {
+      // Try audio CD detection first — cdparanoia -Q is fast (~1s) and
+      // must run before MakeMKV which can't handle audio CDs and may hang
+      const audioResult = await this.getAudioCDInfo(discIndex)
+      if (audioResult) return audioResult
+
       if (this.hasMakeMKV()) {
         const result = await this.getDiscInfoViaMakeMKV(discIndex)
         if (result) return result
@@ -417,6 +428,72 @@ export class DiscDetectionService {
     } finally {
       this.fullScanInProgress = false
       log.info(`getDiscInfo(${discIndex}) — scan lock released`)
+    }
+  }
+
+  /**
+   * Detect audio CDs using cdparanoia -Q.
+   * Returns DiscInfo with discType='AUDIO_CD' if the disc is an audio CD, null otherwise.
+   */
+  private async getAudioCDInfo(discIndex: number): Promise<DiscInfo | null> {
+    try {
+      // Find the device path from drives list
+      const drives = this.lastDrives || []
+      const drive = drives[discIndex]
+      const devicePath = drive?.devicePath || undefined
+
+      const toc = await this.cdRipperService.queryTOC(devicePath)
+      if (!toc || toc.trackCount === 0) {
+        log.debug('getAudioCDInfo: not an audio CD (cdparanoia returned no tracks)')
+        return null
+      }
+
+      log.info(`getAudioCDInfo: Audio CD detected — ${toc.trackCount} tracks, ${toc.totalDurationSeconds.toFixed(0)}s`)
+
+      // Calculate MusicBrainz disc ID
+      const discId = this.musicBrainzService.calculateDiscId(toc.trackOffsets, toc.leadOutSector)
+
+      // Build TrackInfo[] from CDTrackInfo[]
+      const tracks: TrackInfo[] = toc.tracks.map(t => {
+        const h = Math.floor(t.durationSeconds / 3600)
+        const m = Math.floor((t.durationSeconds % 3600) / 60)
+        const s = Math.floor(t.durationSeconds % 60)
+        return {
+          id: t.number - 1, // 0-based to match MakeMKV convention
+          title: `Track ${t.number}`,
+          duration: `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`,
+          durationSeconds: t.durationSeconds,
+          size: '',
+          sizeBytes: 0,
+          chapters: 0,
+          resolution: '',
+          framerate: '',
+          isInterlaced: false,
+          audioTracks: [{ id: 0, codec: 'PCM', language: '', channels: 'stereo', bitrate: '1411 kbps' }],
+          subtitleTracks: []
+        }
+      })
+
+      const trackFingerprint = tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+
+      return {
+        title: drive?.discTitle || 'Audio CD',
+        discType: 'AUDIO_CD',
+        discId,
+        fingerprint: `${discId}::${toc.trackCount}::${trackFingerprint}`,
+        trackCount: toc.trackCount,
+        tracks,
+        metadata: {
+          musicbrainzDiscId: discId,
+          devicePath: toc.devicePath,
+          leadOutSector: String(toc.leadOutSector),
+          scanMethod: 'cdparanoia'
+        },
+        cdToc: toc
+      }
+    } catch (err) {
+      log.debug(`getAudioCDInfo: failed (not an audio CD or cdparanoia error): ${err}`)
+      return null
     }
   }
 

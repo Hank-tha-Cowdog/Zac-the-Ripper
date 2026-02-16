@@ -55,6 +55,12 @@ export interface TMDBResult {
   belongs_to_collection?: { id: number; name: string } | null
 }
 
+export interface MusicTrackMeta {
+  number: number
+  title: string
+  artist: string
+}
+
 export interface DiscSessionState {
   sessionDiscId: string | null
   kodiTitle: string
@@ -62,6 +68,17 @@ export interface DiscSessionState {
   kodiTmdbId: number | null
   kodiSetName: string
   kodiSetOverview: string
+  // Music fields (audio CD)
+  musicArtist: string
+  musicAlbumArtist: string
+  musicAlbum: string
+  musicYear: string
+  musicDiscNumber: number
+  musicTotalDiscs: number
+  musicTracks: MusicTrackMeta[]
+  musicMbReleaseId: string | null
+  musicIsVariousArtists: boolean
+  musicCoverArtPath: string | null
 }
 
 const DEFAULT_DISC_SESSION: DiscSessionState = {
@@ -70,7 +87,17 @@ const DEFAULT_DISC_SESSION: DiscSessionState = {
   kodiYear: '',
   kodiTmdbId: null,
   kodiSetName: '',
-  kodiSetOverview: ''
+  kodiSetOverview: '',
+  musicArtist: '',
+  musicAlbumArtist: '',
+  musicAlbum: '',
+  musicYear: '',
+  musicDiscNumber: 1,
+  musicTotalDiscs: 1,
+  musicTracks: [],
+  musicMbReleaseId: null,
+  musicIsVariousArtists: false,
+  musicCoverArtPath: null
 }
 
 interface DiscState {
@@ -154,15 +181,35 @@ export const useDiscStore = create<DiscState>((set, get) => ({
         // Genuinely new disc — reset session
         const cleaned = info ? cleanDiscTitle(info.title) : ''
         console.log(`[disc-store] Disc changed — resetting session, kodiTitle="${cleaned}"`)
-        set({
-          tmdbResult: null,
-          trackCategories: {},
-          trackNames: {},
-          discSession: {
-            ...DEFAULT_DISC_SESSION,
-            kodiTitle: cleaned
-          }
-        })
+
+        if (info?.discType === 'AUDIO_CD') {
+          // Audio CD: populate music fields, skip TMDB
+          set({
+            tmdbResult: null,
+            trackCategories: {},
+            trackNames: {},
+            discSession: {
+              ...DEFAULT_DISC_SESSION,
+              sessionDiscId: info.discId,
+              musicAlbum: cleaned || 'Audio CD',
+              musicTracks: info.tracks.map(t => ({
+                number: t.id + 1, // Back to 1-based
+                title: t.title,
+                artist: ''
+              }))
+            }
+          })
+        } else {
+          set({
+            tmdbResult: null,
+            trackCategories: {},
+            trackNames: {},
+            discSession: {
+              ...DEFAULT_DISC_SESSION,
+              kodiTitle: cleaned
+            }
+          })
+        }
       }
     }
   },

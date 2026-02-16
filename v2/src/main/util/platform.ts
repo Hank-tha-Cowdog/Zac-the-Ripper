@@ -61,6 +61,10 @@ export function getDefaultToolPaths(): Record<string, string[]> {
           '/opt/homebrew/bin/lsdvd',
           '/usr/local/bin/lsdvd',
           '/usr/bin/lsdvd'
+        ],
+        cdparanoia: [
+          '/opt/homebrew/bin/cdparanoia',
+          '/usr/local/bin/cdparanoia'
         ]
       }
     case 'linux':
@@ -70,7 +74,8 @@ export function getDefaultToolPaths(): Record<string, string[]> {
         ffprobe: ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe'],
         mpv: ['/usr/bin/mpv', '/usr/local/bin/mpv'],
         ffplay: ['/usr/bin/ffplay', '/usr/local/bin/ffplay'],
-        lsdvd: ['/usr/bin/lsdvd', '/usr/local/bin/lsdvd']
+        lsdvd: ['/usr/bin/lsdvd', '/usr/local/bin/lsdvd'],
+        cdparanoia: ['/usr/bin/cdparanoia', '/usr/local/bin/cdparanoia']
       }
     case 'windows':
       return {

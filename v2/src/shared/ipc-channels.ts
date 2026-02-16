@@ -77,6 +77,18 @@ export const IPC = {
   // Notifications
   NOTIFY_TEST: 'notify:test',
 
+  // Audio CD operations
+  AUDIO_RIP: 'audio:rip',
+  AUDIO_CANCEL: 'audio:cancel',
+  AUDIO_PROGRESS: 'audio:progress',
+  AUDIO_COMPLETE: 'audio:complete',
+  AUDIO_ERROR: 'audio:error',
+
+  // MusicBrainz
+  MUSICBRAINZ_LOOKUP: 'musicbrainz:lookup',
+  MUSICBRAINZ_SEARCH: 'musicbrainz:search',
+  MUSICBRAINZ_COVER_ART: 'musicbrainz:cover-art',
+
   // Log forwarding (main → renderer)
   LOG_ENTRY: 'log:entry'
 } as const

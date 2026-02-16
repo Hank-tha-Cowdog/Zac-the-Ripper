@@ -33,6 +33,9 @@ async function getToolVersion(name: string, path: string): Promise<string | null
       case 'lsdvd':
         args = ['-V'] // lsdvd -V prints version
         break
+      case 'cdparanoia':
+        args = ['-V']
+        break
       default:
         args = ['--version']
     }
@@ -42,12 +45,12 @@ async function getToolVersion(name: string, path: string): Promise<string | null
     let stdout = ''
     try {
       const result = await execFileAsync(path, args, { timeout: 10000 })
-      stdout = result.stdout
+      stdout = result.stdout || result.stderr || ''
     } catch (execErr: unknown) {
       // If the process ran but exited non-zero, we still get stdout/stderr
       const err = execErr as { stdout?: string; stderr?: string; code?: number }
-      if (err.stdout) {
-        stdout = err.stdout
+      if (err.stdout || err.stderr) {
+        stdout = err.stdout || err.stderr || ''
       } else {
         throw execErr
       }
@@ -77,6 +80,14 @@ async function getToolVersion(name: string, path: string): Promise<string | null
       return 'installed'
     }
 
+    // cdparanoia: version line like "cdparanoia III release 10.2 ..."
+    // Note: cdparanoia -V outputs to stderr, so stdout may be empty
+    if (name === 'cdparanoia') {
+      const versionMatch = stdout.match(/release\s+([\d.]+)/)
+      if (versionMatch) return versionMatch[1]
+      return 'installed'
+    }
+
     return stdout.split('\n')[0] || 'installed'
   } catch (err) {
     log.warn(`Could not get version for ${name}: ${err}`)
@@ -85,7 +96,7 @@ async function getToolVersion(name: string, path: string): Promise<string | null
 }
 
 export async function checkTools(): Promise<ToolStatus[]> {
-  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay', 'lsdvd']
+  const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay', 'lsdvd', 'cdparanoia']
   const results: ToolStatus[] = []
 
   for (const tool of tools) {

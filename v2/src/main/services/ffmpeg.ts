@@ -39,6 +39,10 @@ export class FFmpegService {
     return findToolPath('ffmpeg') || 'ffmpeg'
   }
 
+  getPath(): string {
+    return this.getFFmpegPath()
+  }
+
   async encode(params: EncodeParams): Promise<{ success: boolean; error?: string }> {
     const { jobId, inputPath, outputPath, args, totalDuration, window, onProgress } = params
     const ffmpeg = this.getFFmpegPath()

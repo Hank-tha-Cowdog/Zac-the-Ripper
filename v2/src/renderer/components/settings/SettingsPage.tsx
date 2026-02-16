@@ -4,6 +4,7 @@ import { EncodingSettings } from './EncodingSettings'
 import { KodiSettings } from './KodiSettings'
 import { JellyfinSettings } from './JellyfinSettings'
 import { PlexSettings } from './PlexSettings'
+import { AudioSettings } from './AudioSettings'
 import { ToolPathSettings } from './ToolPathSettings'
 import { NotificationSettings } from './NotificationSettings'
 import { AboutPanel } from './AboutPanel'
@@ -19,6 +20,7 @@ export function SettingsPage() {
       <div className="grid grid-cols-2 gap-6">
         <div className="space-y-6">
           <GeneralSettings settings={settings} onSave={saveSetting} />
+          <AudioSettings settings={settings} onSave={saveSetting} />
           <NotificationSettings settings={settings} onSave={saveSetting} />
           <ToolPathSettings settings={settings} onSave={saveSetting} />
         </div>

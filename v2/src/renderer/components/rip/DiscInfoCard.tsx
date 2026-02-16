@@ -117,6 +117,7 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
     )
   }
 
+  const isAudioCD = discInfo.discType === 'AUDIO_CD'
   const mainTrack = discInfo.tracks[0]
   const resolution = mainTrack?.resolution || ''
   const framerate = mainTrack?.framerate || ''
@@ -125,6 +126,50 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
   const totalAudio = discInfo.tracks.reduce((sum, t) => sum + t.audioTracks.length, 0)
   const totalSubs = discInfo.tracks.reduce((sum, t) => sum + t.subtitleTracks.length, 0)
   const mainAudio = mainTrack?.audioTracks || []
+  const totalDuration = discInfo.tracks.reduce((sum, t) => sum + t.durationSeconds, 0)
+
+  // Audio CD display
+  if (isAudioCD) {
+    return (
+      <Card className="p-3">
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Music className="w-4 h-4 text-purple-400 shrink-0" />
+            <h3 className="text-sm font-semibold text-zinc-100 truncate">{discInfo.title}</h3>
+            {onRescan && (
+              <Tooltip content="Rescan disc drive">
+                <button onClick={onRescan} className="ml-auto p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Tooltip content="Audio CD — will be ripped to FLAC using cdparanoia">
+              <Badge variant="info">AUDIO CD</Badge>
+            </Tooltip>
+            <Badge>{discInfo.trackCount} tracks</Badge>
+            <Badge variant="info">{formatDuration(totalDuration)}</Badge>
+            <Badge variant="info">16-bit / 44.1kHz</Badge>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[10px] pt-1 border-t border-zinc-800/50">
+            <div className="flex items-center gap-1.5">
+              <Clock className="w-2.5 h-2.5 text-zinc-500" />
+              <span className="text-zinc-500">Total</span>
+              <span className="text-zinc-300 font-mono">{formatDuration(totalDuration)}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 text-zinc-600 text-center font-mono text-[8px] font-bold">#</span>
+              <span className="text-zinc-500">MB Disc ID</span>
+              <span className="text-zinc-300 font-mono truncate">{discInfo.discId}</span>
+            </div>
+          </div>
+        </div>
+      </Card>
+    )
+  }
 
   return (
     <Card className="p-3">
