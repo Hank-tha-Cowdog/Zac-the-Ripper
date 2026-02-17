@@ -602,8 +602,15 @@ export class JobQueueService {
           }
         })
 
-        if (!extractResult.success || extractResult.outputFiles.length === 0) {
-          // MakeMKV failed — try ffmpeg VOB fallback for DVDs
+        // Use partial MakeMKV results if any files were extracted (e.g., 3 of 4 episodes
+        // succeeded but the "play all" title failed). Only fall back to FFmpeg if zero files.
+        if (extractResult.outputFiles.length > 0 && !extractResult.success) {
+          log.warn(`[media-lib] MakeMKV partially succeeded: ${extractResult.outputFiles.length} file(s) extracted. ${extractResult.error || 'Some titles failed.'}`)
+          sendProgress(50, `Step 1/3 — Extracted ${extractResult.outputFiles.length} of ${titleIds.length} titles (partial)`)
+        }
+
+        if (extractResult.outputFiles.length === 0) {
+          // MakeMKV produced no files — try ffmpeg VOB fallback for DVDs
           // Allow fallback when discInfo is missing (e.g. disc couldn't be read) — FFmpeg can
           // independently probe the VIDEO_TS structure. Only skip for confirmed non-DVD types.
           const isDVDOrUnknown = !params.discInfo || params.discInfo.discType === 'DVD'
