@@ -320,7 +320,18 @@ export function RipConfigPanel({
                 <select
                   className="select w-full pr-8"
                   value={mediaType}
-                  onChange={(e) => onMediaTypeChange(e.target.value)}
+                  onChange={(e) => {
+                    const newType = e.target.value
+                    onMediaTypeChange(newType)
+                    // Auto-clear movie-specific fields when switching to TV show
+                    if (newType === 'tvshow') {
+                      if (edition) onEditionChange('')
+                      if (customEdition) onCustomEditionChange('')
+                      if (isExtrasDisc) onExtrasDiscChange(false)
+                      if (soundVersion) onSoundVersionChange('')
+                      if (customSoundVersion) onCustomSoundVersionChange('')
+                    }
+                  }}
                 >
                   <option value="movie">Movie</option>
                   <option value="tvshow">TV Show</option>
@@ -580,12 +591,12 @@ export function RipConfigPanel({
               </div>
             )}
 
-            {/* Disc Number (multi-disc sets) */}
-            {mediaType === 'movie' && (
+            {/* Disc Number (multi-disc sets — movies and TV box sets) */}
+            {(mediaType === 'movie' || mediaType === 'tvshow') && (
               <div className="flex flex-col gap-1">
                 <LabelWithTooltip
                   label="Disc Number"
-                  tooltip="For multi-disc movies (e.g., a 2-disc extended edition). Appends '-disc2' to the filename. Leave blank for single-disc movies. Plex and Jellyfin use this to group discs under one movie entry."
+                  tooltip="For multi-disc sets (movies or TV box sets). Appends '-disc2' to the filename. Leave blank for single-disc releases. Plex and Jellyfin use this to group discs under one entry."
                   className="label-tech"
                 />
                 <div className="flex items-center gap-2">

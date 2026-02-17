@@ -7,8 +7,19 @@ function isGenericName(name: string): boolean {
   return /^Title\s+\d+$/i.test(name)
 }
 
-const CATEGORY_OPTIONS = [
+const MOVIE_CATEGORY_OPTIONS = [
   { value: 'main', label: 'Main Feature' },
+  { value: 'behindthescenes', label: 'Behind The Scenes' },
+  { value: 'deleted', label: 'Deleted Scenes' },
+  { value: 'featurette', label: 'Featurette' },
+  { value: 'interview', label: 'Interview' },
+  { value: 'trailer', label: 'Trailer' },
+  { value: 'short', label: 'Short' },
+  { value: 'other', label: 'Other' }
+]
+
+const TV_CATEGORY_OPTIONS = [
+  { value: 'episode', label: 'Episode' },
   { value: 'behindthescenes', label: 'Behind The Scenes' },
   { value: 'deleted', label: 'Deleted Scenes' },
   { value: 'featurette', label: 'Featurette' },
@@ -36,15 +47,18 @@ export function TrackSelector({ isLibraryMode, movieTitle, mediaType, tvSeason, 
   if (!discInfo) return null
 
   const isTVShow = mediaType === 'tvshow' && isLibraryMode
-  const showExtrasUI = isLibraryMode && selectedTracks.length > 1 && !isTVShow
+  const showCategoryUI = isLibraryMode && selectedTracks.length > 1
 
   // Find the longest track id for auto-assigning 'main'
   const longestTrackId = discInfo.tracks.length > 0
     ? discInfo.tracks.reduce((a, b) => a.durationSeconds > b.durationSeconds ? a : b).id
     : -1
 
+  const categoryOptions = isTVShow ? TV_CATEGORY_OPTIONS : MOVIE_CATEGORY_OPTIONS
+
   const getCategory = (trackId: number) => {
     if (trackCategories[trackId]) return trackCategories[trackId]
+    if (isTVShow) return 'episode'
     return trackId === longestTrackId ? 'main' : 'featurette'
   }
 
@@ -138,41 +152,33 @@ export function TrackSelector({ isLibraryMode, movieTitle, mediaType, tvSeason, 
                   )}
                 </div>
 
-                {/* TV Show episode assignment UI */}
-                {isTVShow && isSelected && (
-                  <div className="mt-2 ml-7 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex items-center gap-1">
-                      <span className="text-[10px] text-zinc-500 uppercase tracking-wider">S{String(parseInt(tvSeason || '1')).padStart(2, '0')}E</span>
-                      <input
-                        className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 w-14 text-center"
-                        type="number"
-                        min="1"
-                        value={getEpisodeNumber(track.id)}
-                        onChange={(e) => setTvEpisodeNumber(track.id, parseInt(e.target.value) || 1)}
-                      />
-                    </div>
-                    <input
-                      className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 flex-1"
-                      value={getEpisodeTitle(track.id)}
-                      onChange={(e) => setTvEpisodeTitle(track.id, e.target.value)}
-                      placeholder="Episode title..."
-                    />
-                  </div>
-                )}
-
-                {/* Extras categorization UI for library export mode */}
-                {showExtrasUI && isSelected && (
+                {/* Track categorization UI for library export mode */}
+                {showCategoryUI && isSelected && (
                   <div className="mt-2 ml-7 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <select
                       className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 w-36"
                       value={category}
                       onChange={(e) => setTrackCategory(track.id, e.target.value)}
                     >
-                      {CATEGORY_OPTIONS.map((opt) => (
+                      {categoryOptions.map((opt) => (
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
-                    {category !== 'main' && (
+                    {/* Episode number for TV episode tracks */}
+                    {isTVShow && category === 'episode' && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-mono">S{String(parseInt(tvSeason || '1')).padStart(2, '0')}E</span>
+                        <input
+                          className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 w-14 text-center"
+                          type="number"
+                          min="1"
+                          value={getEpisodeNumber(track.id)}
+                          onChange={(e) => setTvEpisodeNumber(track.id, parseInt(e.target.value) || 1)}
+                        />
+                      </div>
+                    )}
+                    {/* Extras name for non-main/non-episode tracks */}
+                    {category !== 'main' && category !== 'episode' && (
                       <input
                         className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 flex-1"
                         value={getTrackName(track.id, track.title)}

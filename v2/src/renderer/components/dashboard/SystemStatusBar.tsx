@@ -45,7 +45,8 @@ export function SystemStatusBar() {
     ffprobe: 'FFprobe — required for media analysis. Bundled with the app, or installed with FFmpeg.',
     mpv: 'mpv — optional, enables disc preview with full playback controls. Install via Homebrew: brew install mpv',
     ffplay: 'ffplay — optional fallback for disc preview (bundled with FFmpeg). Install via Homebrew: brew install ffmpeg',
-    lsdvd: 'lsdvd — optional, provides fallback DVD scanning when MakeMKV hangs on certain discs. Install via Homebrew: brew install lsdvd'
+    lsdvd: 'lsdvd — optional, provides fallback DVD scanning when MakeMKV hangs on certain discs. Install via Homebrew: brew install lsdvd',
+    cdparanoia: 'cdparanoia — required for audio CD ripping. Not bundled — install via Homebrew: brew install cdparanoia'
   }
 
   return (
