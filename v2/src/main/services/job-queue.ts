@@ -467,6 +467,9 @@ export class JobQueueService {
       // ── Determine final library output paths ──────────────────────
       if (!primaryLibraryPath) throw new Error('Library path not configured — set it in Settings > Jellyfin or Settings > Kodi')
 
+      // TV shows use a completely different folder structure — skip movie path setup
+      const isTVShow = opts?.mediaType === 'tvshow' && opts?.tvOptions
+
       // When isExtrasDisc is true, ALL tracks are extras — override any 'main' category
       // in trackMeta so nothing gets written to the main movie directory.
       const trackMetaOverridden = (opts?.isExtrasDisc && params.trackMeta)
@@ -478,33 +481,46 @@ export class JobQueueService {
       const hasMainTrack = hasTrackMeta && trackMetaOverridden!.some(m => m.category === 'main')
       const useExtrasDiscMode = opts?.isExtrasDisc && !hasTrackMeta
 
-      // Always compute the movie root dir (Movies/Title (Year)/) — extras subfolders go here
-      const { outputDir: movieRootDir } = this.kodiService.buildMoviePath({
-        libraryPath: primaryLibraryPath,
-        title: movieTitle,
-        year: movieYear
-      })
+      // Movie path setup — only for movies, TV shows handle their own paths later
+      let movieRootDir = ''
+      let finalVideoPath = ''
+      let libraryOutputDir = ''
+      let skipMainEncode = false
 
-      // Compute main feature path (may not be used if all tracks are extras)
-      const { videoPath: finalVideoPath, outputDir: libraryOutputDir } = this.kodiService.buildMoviePath({
-        libraryPath: primaryLibraryPath,
-        title: movieTitle,
-        year: movieYear,
-        edition: opts?.edition,
-        soundVersion: opts?.soundVersion,
-        discNumber: opts?.discNumber,
-        totalDiscs: opts?.totalDiscs,
-        isExtrasDisc: useExtrasDiscMode
-      })
+      if (!isTVShow) {
+        // Always compute the movie root dir (Movies/Title (Year)/) — extras subfolders go here
+        const movieRoot = this.kodiService.buildMoviePath({
+          libraryPath: primaryLibraryPath,
+          title: movieTitle,
+          year: movieYear
+        })
+        movieRootDir = movieRoot.outputDir
 
-      // Skip main feature encode if trackMeta exists but has no 'main' category
-      const skipMainEncode = hasTrackMeta && !hasMainTrack
+        // Compute main feature path (may not be used if all tracks are extras)
+        const movieMain = this.kodiService.buildMoviePath({
+          libraryPath: primaryLibraryPath,
+          title: movieTitle,
+          year: movieYear,
+          edition: opts?.edition,
+          soundVersion: opts?.soundVersion,
+          discNumber: opts?.discNumber,
+          totalDiscs: opts?.totalDiscs,
+          isExtrasDisc: useExtrasDiscMode
+        })
+        finalVideoPath = movieMain.videoPath
+        libraryOutputDir = movieMain.outputDir
 
-      mkdirSync(movieRootDir, { recursive: true })
-      if (!skipMainEncode) mkdirSync(libraryOutputDir, { recursive: true })
-      log.info(`[media-lib] Movie root dir: ${movieRootDir}`)
-      log.info(`[media-lib] Output dir: ${libraryOutputDir}`)
-      log.info(`[media-lib] Final video path: ${finalVideoPath} (skipMainEncode=${skipMainEncode})`)
+        // Skip main feature encode if trackMeta exists but has no 'main' category
+        skipMainEncode = hasTrackMeta && !hasMainTrack
+
+        mkdirSync(movieRootDir, { recursive: true })
+        if (!skipMainEncode) mkdirSync(libraryOutputDir, { recursive: true })
+        log.info(`[media-lib] Movie root dir: ${movieRootDir}`)
+        log.info(`[media-lib] Output dir: ${libraryOutputDir}`)
+        log.info(`[media-lib] Final video path: ${finalVideoPath} (skipMainEncode=${skipMainEncode})`)
+      } else {
+        log.info(`[media-lib] TV show mode — skipping movie path setup`)
+      }
 
       // ── Fetch TMDB metadata + artwork concurrently with rip ─────
       let tmdbDetails: Awaited<ReturnType<TMDBService['getDetails']>> = null
@@ -588,13 +604,27 @@ export class JobQueueService {
 
         if (!extractResult.success || extractResult.outputFiles.length === 0) {
           // MakeMKV failed — try ffmpeg VOB fallback for DVDs
-          if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
-            log.info(`[media-lib] MakeMKV failed — attempting ffmpeg VOB fallback`)
+          // Allow fallback when discInfo is missing (e.g. disc couldn't be read) — FFmpeg can
+          // independently probe the VIDEO_TS structure. Only skip for confirmed non-DVD types.
+          const isDVDOrUnknown = !params.discInfo || params.discInfo.discType === 'DVD'
+          if (isDVDOrUnknown) {
+            log.info(`[media-lib] MakeMKV failed — attempting ffmpeg VOB fallback` +
+              (!params.discInfo ? ' (discInfo unavailable, assuming DVD)' : ''))
             sendProgress(5, 'Step 1/3 — MakeMKV failed, trying ffmpeg fallback...')
+
+            // If discInfo is missing, build a minimal stub so FFmpeg ripper can detect the device
+            const fallbackDiscInfo = params.discInfo || {
+              discType: 'DVD' as const,
+              tracks: [],
+              title: 'Unknown',
+              discId: undefined,
+              trackCount: 0,
+              metadata: { devicePath: `/dev/rdisk${discIndex}` }
+            }
 
             extractResult = await this.ffmpegRipperService.ripTitlesFromVOB({
               jobId,
-              discInfo: params.discInfo,
+              discInfo: fallbackDiscInfo,
               titleIds,
               outputDir: stagingDir,
               window,
@@ -623,7 +653,7 @@ export class JobQueueService {
       }
 
       // ── TV Show Pipeline Branch ─────────────────────────────────────
-      if (opts?.mediaType === 'tvshow' && opts?.tvOptions) {
+      if (isTVShow) {
         const tv = opts.tvOptions
         const showYear = parseInt(tv.year || '') || movieYear
 
