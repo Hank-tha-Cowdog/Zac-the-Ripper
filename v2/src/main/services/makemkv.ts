@@ -77,6 +77,8 @@ export class MakeMKVService {
     // Ensure output directory exists
     mkdirSync(outputDir, { recursive: true })
 
+    const failedTitles: Array<{ titleId: number; error: string }> = []
+
     for (let idx = 0; idx < titleIds.length; idx++) {
       const titleId = titleIds[idx]
       const result = await this.ripSingleTitle({
@@ -98,7 +100,12 @@ export class MakeMKVService {
       }
 
       if (!result.success) {
-        return { success: false, outputFiles, error: result.error, readErrors: allReadErrors }
+        // Don't abort — continue with remaining titles so partial results are preserved.
+        // TV DVDs often include a "play all" title that MakeMKV can't handle, but
+        // individual episode titles extract fine.
+        log.warn(`[rip] Title ${titleId} failed: ${result.error} — continuing with remaining titles`)
+        failedTitles.push({ titleId, error: result.error || 'Unknown error' })
+        continue
       }
 
       if (result.outputFiles.length > 0) {
@@ -112,7 +119,16 @@ export class MakeMKVService {
       log.warn(`[rip] Completed with ${allReadErrors.length} read error(s) across ${affectedFiles.length} file(s): ${affectedFiles.join(', ')}`)
     }
 
-    return { success: true, outputFiles, readErrors: allReadErrors }
+    if (failedTitles.length > 0) {
+      log.warn(`[rip] ${failedTitles.length} of ${totalTitles} title(s) failed: ${failedTitles.map(f => `title ${f.titleId}`).join(', ')}`)
+    }
+
+    // Report success if ANY titles were extracted — partial results are usable
+    const overallSuccess = outputFiles.length > 0
+    const error = failedTitles.length > 0
+      ? `${failedTitles.length} of ${totalTitles} title(s) failed: ${failedTitles.map(f => f.error).join('; ')}`
+      : undefined
+    return { success: overallSuccess, outputFiles, readErrors: allReadErrors, error }
   }
 
   private ripSingleTitle(params: {
