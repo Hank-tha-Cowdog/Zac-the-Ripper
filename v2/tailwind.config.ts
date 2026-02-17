@@ -11,7 +11,8 @@ const config: Config = {
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace']
+        mono: ['JetBrains Mono', 'monospace'],
+        display: ['Share Tech', 'Inter', 'system-ui', 'sans-serif']
       },
       animation: {
         'fade-in': 'fadeIn 0.2s ease-in-out',

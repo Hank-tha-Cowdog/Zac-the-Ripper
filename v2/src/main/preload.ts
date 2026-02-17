@@ -113,6 +113,10 @@ const api = {
   // Filesystem
   fs: {
     selectDirectory: (title?: string) => ipcRenderer.invoke(IPC.FS_SELECT_DIRECTORY, title),
+    selectFile: (title?: string, filters?: Array<{ name: string; extensions: string[] }>) =>
+      ipcRenderer.invoke(IPC.FS_SELECT_FILE, title, filters),
+    selectFiles: (title?: string, options?: { filters?: Array<{ name: string; extensions: string[] }>; directories?: boolean; multiSelections?: boolean }) =>
+      ipcRenderer.invoke(IPC.FS_SELECT_FILES, title, options),
     getDiskSpace: (path: string) => ipcRenderer.invoke(IPC.FS_GET_DISK_SPACE, path),
     openPath: (path: string) => ipcRenderer.invoke(IPC.FS_OPEN_PATH, path)
   },

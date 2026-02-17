@@ -72,6 +72,8 @@ export class JobQueueService {
     kodiOptions?: unknown
     discSetId?: number
     discNumber?: number
+    isIngest?: boolean
+    ingestFiles?: string[]
     window: BrowserWindow
     makemkvService: MakeMKVService
   }): Promise<{ jobId: string; dbId: number }> {
@@ -140,7 +142,9 @@ export class JobQueueService {
         additionalLibraryPaths: additionalPaths,
         discSetId,
         discNumber,
-        discInfo: discInfo || undefined
+        discInfo: discInfo || undefined,
+        isIngest: params.isIngest,
+        ingestFiles: params.ingestFiles
       })
 
       return { jobId, dbId: job.id }
@@ -421,12 +425,19 @@ export class JobQueueService {
     discSetId?: number
     discNumber?: number
     discInfo?: DiscInfo
+    isIngest?: boolean
+    ingestFiles?: string[]
   }): Promise<void> {
     const { discIndex, titleIds, window, makemkvService, modes } = params
     const opts = params.kodiOptions as {
       mediaType?: string; title?: string; year?: string; tmdbId?: number
       edition?: string; isExtrasDisc?: boolean; setName?: string; setOverview?: string
       soundVersion?: string; discNumber?: number; totalDiscs?: number
+      customPlot?: string; customActors?: string[]; customPosterPath?: string
+      tvOptions?: {
+        showName: string; year: string; season: number
+        episodes: Array<{ trackId: number; episodeNumber: number; episodeTitle: string }>
+      }
     } | undefined
 
     const primaryLibraryPath = params.primaryLibraryPath
@@ -526,62 +537,243 @@ export class JobQueueService {
       const preset = codec === 'hevc' ? 'hevc' : 'h264'
       log.info(`[media-lib] Codec preset: ${preset}`)
 
-      // ── Step 1: Extract from disc ──────────────────────────────────
-      sendProgress(0, 'Step 1/3 — Starting disc extraction...')
+      // ── Step 1: Extract from disc (or use ingest files) ─────────────
+      let extractResult: { success: boolean; outputFiles: string[]; error?: string; readErrors?: ReadError[] }
 
-      log.info(`[media-lib] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
-      getDiscDetectionService().rippingInProgress = true
+      if (params.isIngest && params.ingestFiles && params.ingestFiles.length > 0) {
+        // Ingest mode: skip disc extraction, use local files directly
+        log.info(`[media-lib] Ingest mode — using ${params.ingestFiles.length} local file(s)`)
+        sendProgress(0, 'Step 1/3 — Using local files (no disc extraction)...')
 
-      let extractResult = await makemkvService.ripTitles({
-        jobId,
-        discIndex,
-        titleIds,
-        outputDir: stagingDir,
-        window,
-        onProgress: (pct, message) => {
-          ripPct = pct
-          if (phase === 'rip') {
-            // Step 1/3: Rip maps to 0-50% of overall progress
-            const overall = pct * 0.5
-            sendProgress(overall, `Step 1/3 — Extracting from disc: ${pct.toFixed(0)}%`)
+        // Copy ingest files to staging dir so the rest of the pipeline works the same
+        for (const ingestFile of params.ingestFiles) {
+          const destPath = join(stagingDir, ingestFile.split('/').pop() || 'input.mkv')
+          try {
+            copyFileSync(ingestFile, destPath)
+          } catch (err) {
+            log.warn(`[media-lib] Failed to copy ingest file: ${err}`)
           }
         }
-      })
 
-      if (!extractResult.success || extractResult.outputFiles.length === 0) {
-        // MakeMKV failed — try ffmpeg VOB fallback for DVDs
-        if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
-          log.info(`[media-lib] MakeMKV failed — attempting ffmpeg VOB fallback`)
-          sendProgress(5, 'Step 1/3 — MakeMKV failed, trying ffmpeg fallback...')
+        const stagedFiles = params.ingestFiles.map(f => join(stagingDir, f.split('/').pop() || 'input.mkv'))
+        extractResult = { success: true, outputFiles: stagedFiles.filter(f => existsSync(f)) }
 
-          extractResult = await this.ffmpegRipperService.ripTitlesFromVOB({
-            jobId,
-            discInfo: params.discInfo,
-            titleIds,
-            outputDir: stagingDir,
-            window,
-            onProgress: (pct, message) => {
-              ripPct = pct
-              if (phase === 'rip') {
-                sendProgress(pct * 0.5, `Step 1/3 — Extracting (ffmpeg): ${pct.toFixed(0)}%`)
-              }
+        if (extractResult.outputFiles.length === 0) {
+          throw new Error('No valid ingest files found')
+        }
+
+        sendProgress(50, 'Step 1/3 — Local files ready')
+        log.info(`[media-lib] Ingest: ${extractResult.outputFiles.length} file(s) staged`)
+      } else {
+        sendProgress(0, 'Step 1/3 — Starting disc extraction...')
+
+        log.info(`[media-lib] Starting MakeMKV extraction: disc:${discIndex} titles=[${titleIds}] → ${stagingDir}`)
+        getDiscDetectionService().rippingInProgress = true
+
+        extractResult = await makemkvService.ripTitles({
+          jobId,
+          discIndex,
+          titleIds,
+          outputDir: stagingDir,
+          window,
+          onProgress: (pct, message) => {
+            ripPct = pct
+            if (phase === 'rip') {
+              // Step 1/3: Rip maps to 0-50% of overall progress
+              const overall = pct * 0.5
+              sendProgress(overall, `Step 1/3 — Extracting from disc: ${pct.toFixed(0)}%`)
             }
-          })
-
-          if (!extractResult.success || extractResult.outputFiles.length === 0) {
-            throw new Error(extractResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed')
           }
-          log.info(`[media-lib] FFmpeg fallback succeeded — ${extractResult.outputFiles.length} file(s)`)
-        } else {
-          throw new Error(extractResult.error || 'MKV extraction produced no files')
+        })
+
+        if (!extractResult.success || extractResult.outputFiles.length === 0) {
+          // MakeMKV failed — try ffmpeg VOB fallback for DVDs
+          if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
+            log.info(`[media-lib] MakeMKV failed — attempting ffmpeg VOB fallback`)
+            sendProgress(5, 'Step 1/3 — MakeMKV failed, trying ffmpeg fallback...')
+
+            extractResult = await this.ffmpegRipperService.ripTitlesFromVOB({
+              jobId,
+              discInfo: params.discInfo,
+              titleIds,
+              outputDir: stagingDir,
+              window,
+              onProgress: (pct, message) => {
+                ripPct = pct
+                if (phase === 'rip') {
+                  sendProgress(pct * 0.5, `Step 1/3 — Extracting (ffmpeg): ${pct.toFixed(0)}%`)
+                }
+              }
+            })
+
+            if (!extractResult.success || extractResult.outputFiles.length === 0) {
+              throw new Error(extractResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed')
+            }
+            log.info(`[media-lib] FFmpeg fallback succeeded — ${extractResult.outputFiles.length} file(s)`)
+          } else {
+            throw new Error(extractResult.error || 'MKV extraction produced no files')
+          }
         }
+
+        // Release disc polling guard after entire extraction phase (MakeMKV + potential FFmpeg fallback)
+        getDiscDetectionService().rippingInProgress = false
+
+        log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted` +
+          (extractResult.readErrors?.length ? `, ${extractResult.readErrors.length} read error(s)` : ''))
       }
 
-      // Release disc polling guard after entire extraction phase (MakeMKV + potential FFmpeg fallback)
-      getDiscDetectionService().rippingInProgress = false
+      // ── TV Show Pipeline Branch ─────────────────────────────────────
+      if (opts?.mediaType === 'tvshow' && opts?.tvOptions) {
+        const tv = opts.tvOptions
+        const showYear = parseInt(tv.year || '') || movieYear
 
-      log.info(`[media-lib] MakeMKV finished — ${extractResult.outputFiles.length} file(s) extracted` +
-        (extractResult.readErrors?.length ? `, ${extractResult.readErrors.length} read error(s)` : ''))
+        phase = 'encode'
+        sendProgress(50, 'Step 2/3 — Encoding TV episodes...')
+
+        // Wait for TMDB fetch
+        await tmdbPromise
+
+        // Use custom poster if provided
+        if (opts.customPosterPath && existsSync(opts.customPosterPath) && !posterLocalPath) {
+          posterLocalPath = opts.customPosterPath
+        }
+
+        // Build actors from custom or TMDB
+        const tvActors = opts.customActors && opts.customActors.length > 0
+          ? opts.customActors.map((name, i) => ({ name, role: '', order: i }))
+          : tmdbDetails?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number }, i: number) => ({
+              name: c.name, role: c.character || '', order: c.order ?? i
+            }))
+          || undefined
+
+        // Create show folder + tvshow.nfo
+        this.kodiService.exportTVShow({
+          libraryPath: primaryLibraryPath,
+          showName: tv.showName,
+          year: showYear,
+          metadata: {
+            plot: opts.customPlot || tmdbDetails?.overview || undefined,
+            genres: tmdbDetails?.genres?.map(g => g.name),
+            tmdb_id: opts.tmdbId,
+            imdb_id: tmdbDetails?.imdb_id || undefined,
+            actors: tvActors
+          },
+          artwork: { poster: posterLocalPath, fanart: fanartLocalPath }
+        })
+
+        // Encode + export each episode
+        const allEpisodeFiles: string[] = []
+        for (let ei = 0; ei < extractResult.outputFiles.length; ei++) {
+          const stagingFile = extractResult.outputFiles[ei]
+          const epInfo = tv.episodes[ei]
+          if (!epInfo) continue
+
+          const epCode = `S${String(tv.season).padStart(2, '0')}E${String(epInfo.episodeNumber).padStart(2, '0')}`
+          const epTitle = epInfo.episodeTitle || `Episode ${epInfo.episodeNumber}`
+          const baseName = `${tv.showName} - ${epCode} - ${epTitle}`
+
+          log.info(`[media-lib] Encoding TV episode ${ei + 1}/${extractResult.outputFiles.length}: ${baseName}`)
+
+          const showFolder = showYear ? `${tv.showName} (${showYear})` : tv.showName
+          const seasonDir = join(primaryLibraryPath, 'TV Shows', showFolder, `Season ${String(tv.season).padStart(2, '0')}`)
+          mkdirSync(seasonDir, { recursive: true })
+          const epOutputPath = join(seasonDir, `${baseName}.mkv`)
+
+          try {
+            const epMediaInfo = await this.ffprobeService.analyze(stagingFile)
+            const epEncodeArgs = getEncodingArgs(preset, {
+              mediaInfo: epMediaInfo,
+              preserveInterlaced: params.preserveInterlaced,
+              convertSubsToSrt: params.convertSubsToSrt
+            })
+
+            const epPct = (ei / extractResult.outputFiles.length)
+            sendProgress(50 + epPct * 40, `Step 2/3 — Encoding ${epCode}: ${epTitle}`)
+
+            const epEncodeResult = await this.ffmpegService.encode({
+              jobId: `${jobId}_ep_${ei}`,
+              inputPath: stagingFile,
+              outputPath: epOutputPath,
+              args: epEncodeArgs,
+              totalDuration: epMediaInfo.duration,
+              window,
+              onProgress: (pct) => {
+                sendProgress(50 + ((ei + pct / 100) / extractResult.outputFiles.length) * 40,
+                  `Step 2/3 — Encoding ${epCode}: ${pct.toFixed(0)}%`)
+              }
+            })
+
+            if (epEncodeResult.success) {
+              allEpisodeFiles.push(epOutputPath)
+
+              // Generate episode NFO
+              this.kodiService.exportTVEpisode({
+                libraryPath: primaryLibraryPath,
+                showName: showFolder,
+                season: tv.season,
+                episode: epInfo.episodeNumber,
+                episodeTitle: epTitle,
+                sourceFile: epOutputPath,
+                metadata: {
+                  plot: opts.customPlot || undefined,
+                  tmdb_id: opts.tmdbId,
+                  actors: tvActors
+                }
+              })
+
+              outputFileQueries.createOutputFile({
+                job_id: dbId,
+                file_path: epOutputPath,
+                format: 'mkv',
+                video_codec: preset === 'hevc' ? 'hevc' : 'h264'
+              })
+              log.info(`[media-lib] TV episode encoded: ${epOutputPath}`)
+            } else {
+              log.warn(`[media-lib] TV episode encode failed: ${epEncodeResult.error}`)
+            }
+          } catch (err) {
+            log.warn(`[media-lib] TV episode encode crashed: ${err}`)
+          }
+        }
+
+        // Copy to additional libraries
+        if (params.additionalLibraryPaths) {
+          for (const additionalPath of params.additionalLibraryPaths) {
+            try {
+              this.kodiService.exportTVShow({
+                libraryPath: additionalPath,
+                showName: tv.showName,
+                year: showYear,
+                metadata: { plot: opts.customPlot || tmdbDetails?.overview || undefined, tmdb_id: opts.tmdbId },
+                artwork: { poster: posterLocalPath, fanart: fanartLocalPath }
+              })
+              const showFolder = showYear ? `${tv.showName} (${showYear})` : tv.showName
+              for (const epFile of allEpisodeFiles) {
+                const showDir = join(primaryLibraryPath, 'TV Shows', showFolder)
+                const relPath = epFile.slice(showDir.length)
+                const destDir = join(additionalPath, 'TV Shows', showFolder)
+                const destPath = join(destDir, relPath)
+                mkdirSync(dirname(destPath), { recursive: true })
+                copyFileSync(epFile, destPath)
+              }
+            } catch (err) {
+              log.warn(`[media-lib] TV show additional library copy failed: ${err}`)
+            }
+          }
+        }
+
+        // Clean up and finish
+        try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}
+
+        phase = 'done'
+        sendProgress(100, 'Complete')
+        jobQueries.updateJobStatus(dbId, 'completed')
+        this.updateQueueItem(jobId, 'completed')
+        window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: allEpisodeFiles })
+        notifyJobComplete(`${tv.showName} S${String(tv.season).padStart(2, '0')}`, allEpisodeFiles[0]).catch(() => {})
+        log.info(`[media-lib] TV pipeline complete — ${allEpisodeFiles.length} episode(s)`)
+        return
+      }
 
       // ── Determine main feature vs extras from trackMeta ──────────
       // Use the overridden list (where 'main' → 'featurette' when isExtrasDisc)
@@ -730,6 +922,24 @@ export class JobQueueService {
       // Wait for TMDB fetch to complete (likely already done)
       await tmdbPromise
 
+      // Use custom poster if provided and no TMDB poster
+      if (opts?.customPosterPath && existsSync(opts.customPosterPath)) {
+        if (!posterLocalPath) {
+          posterLocalPath = opts.customPosterPath
+        }
+      }
+
+      // Build actors from custom or TMDB
+      const actorsForNfo = opts?.customActors && opts.customActors.length > 0
+        ? opts.customActors.map((name, i) => ({ name, role: '', order: i }))
+        : tmdbDetails?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number; profile_path?: string }, i: number) => ({
+            name: c.name,
+            role: c.character || '',
+            order: c.order ?? i,
+            thumb: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : undefined
+          }))
+        || undefined
+
       const finalizeParams = {
         libraryPath: primaryLibraryPath,
         title: movieTitle,
@@ -739,11 +949,12 @@ export class JobQueueService {
         metadata: {
           tmdb_id: opts?.tmdbId,
           imdb_id: tmdbDetails?.imdb_id || undefined,
-          plot: tmdbDetails?.overview || undefined,
+          plot: opts?.customPlot || tmdbDetails?.overview || undefined,
           tagline: tmdbDetails?.tagline || undefined,
           genres: tmdbDetails?.genres?.map(g => g.name),
           runtime: tmdbDetails?.runtime || undefined,
-          voteAverage: tmdbDetails?.vote_average || undefined
+          voteAverage: tmdbDetails?.vote_average || undefined,
+          actors: actorsForNfo
         },
         artwork: {
           poster: posterLocalPath,

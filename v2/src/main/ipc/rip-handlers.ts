@@ -18,6 +18,8 @@ export function registerRipHandlers(): void {
     kodiOptions?: unknown
     discSetId?: number
     discNumber?: number
+    isIngest?: boolean
+    ingestFiles?: string[]
   }) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { error: 'No window found' }

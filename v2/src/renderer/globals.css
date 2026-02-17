@@ -4,6 +4,14 @@
 
 /* Zac the Ripper Design System — ported from downlynk "Dark Industrial Engineering" */
 
+@font-face {
+  font-family: 'Share Tech';
+  src: url('./assets/fonts/ShareTech-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   body {
     @apply bg-void text-zinc-100 font-sans overflow-hidden;

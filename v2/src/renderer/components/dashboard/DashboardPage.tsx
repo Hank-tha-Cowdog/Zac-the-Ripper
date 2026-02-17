@@ -52,7 +52,7 @@ export function DashboardPage() {
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-purple-400">Dashboard</h1>
+        <h1 className="text-2xl font-bold text-purple-400 font-display">Dashboard</h1>
         {scanning && <Spinner size={16} />}
       </div>
 

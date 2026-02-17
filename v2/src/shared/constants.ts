@@ -25,6 +25,10 @@ export const MOVIE_VERSIONS = [
   'Theatrical Cut',
   "Director's Cut",
   'Extended',
+  'Special Edition',
+  "Collector's Edition",
+  '25th Anniversary Edition',
+  '50th Anniversary Edition',
   'Widescreen',
   'Fullscreen',
   'Remastered',
@@ -134,5 +138,10 @@ export const DEFAULT_SETTINGS: Record<string, { value: string; category: string 
   'rip.sound_version': { value: '', category: 'rip' },
   'rip.custom_sound_version': { value: '', category: 'rip' },
   'rip.disc_number': { value: '', category: 'rip' },
-  'rip.total_discs': { value: '', category: 'rip' }
+  'rip.total_discs': { value: '', category: 'rip' },
+  'rip.tv_season': { value: '1', category: 'rip' },
+  'rip.tv_start_episode': { value: '1', category: 'rip' },
+
+  // Local file ingest
+  'general.mode_local_ingest': { value: 'false', category: 'general' }
 }

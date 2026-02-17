@@ -21,17 +21,22 @@ const CATEGORY_OPTIONS = [
 interface TrackSelectorProps {
   isLibraryMode?: boolean
   movieTitle?: string
+  mediaType?: string
+  tvSeason?: string
+  tvStartEpisode?: string
 }
 
-export function TrackSelector({ isLibraryMode, movieTitle }: TrackSelectorProps) {
+export function TrackSelector({ isLibraryMode, movieTitle, mediaType, tvSeason, tvStartEpisode }: TrackSelectorProps) {
   const {
     discInfo, selectedTracks, toggleTrack, selectAllTracks, selectMainFeature,
-    trackCategories, trackNames, setTrackCategory, setTrackName
+    trackCategories, trackNames, setTrackCategory, setTrackName,
+    discSession, setTvEpisodeTitle, setTvEpisodeNumber
   } = useDiscStore()
 
   if (!discInfo) return null
 
-  const showExtrasUI = isLibraryMode && selectedTracks.length > 1
+  const isTVShow = mediaType === 'tvshow' && isLibraryMode
+  const showExtrasUI = isLibraryMode && selectedTracks.length > 1 && !isTVShow
 
   // Find the longest track id for auto-assigning 'main'
   const longestTrackId = discInfo.tracks.length > 0
@@ -48,6 +53,19 @@ export function TrackSelector({ isLibraryMode, movieTitle }: TrackSelectorProps)
     if (!isGenericName(trackTitle)) return trackTitle
     const extrasIndex = selectedTracks.filter(id => id !== longestTrackId).indexOf(trackId)
     return `${movieTitle || 'Bonus'} - Bonus ${String(extrasIndex + 1).padStart(3, '0')}`
+  }
+
+  // Auto-sequential episode number for a track based on its position in selectedTracks
+  const getEpisodeNumber = (trackId: number) => {
+    if (discSession.tvEpisodeNumbers[trackId] !== undefined) {
+      return discSession.tvEpisodeNumbers[trackId]
+    }
+    const idx = selectedTracks.indexOf(trackId)
+    return (parseInt(tvStartEpisode || '1') || 1) + idx
+  }
+
+  const getEpisodeTitle = (trackId: number) => {
+    return discSession.tvEpisodeTitles[trackId] || ''
   }
 
   return (
@@ -85,7 +103,7 @@ export function TrackSelector({ isLibraryMode, movieTitle }: TrackSelectorProps)
                   <input
                     type="checkbox"
                     checked={isSelected}
-                    onChange={() => toggleTrack(track.id)}
+                    readOnly
                     className="accent-purple-600"
                   />
                   <span className="text-sm font-medium text-zinc-100">
@@ -119,6 +137,28 @@ export function TrackSelector({ isLibraryMode, movieTitle }: TrackSelectorProps)
                     <Badge variant="info">{track.framerate}fps</Badge>
                   )}
                 </div>
+
+                {/* TV Show episode assignment UI */}
+                {isTVShow && isSelected && (
+                  <div className="mt-2 ml-7 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] text-zinc-500 uppercase tracking-wider">S{String(parseInt(tvSeason || '1')).padStart(2, '0')}E</span>
+                      <input
+                        className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 w-14 text-center"
+                        type="number"
+                        min="1"
+                        value={getEpisodeNumber(track.id)}
+                        onChange={(e) => setTvEpisodeNumber(track.id, parseInt(e.target.value) || 1)}
+                      />
+                    </div>
+                    <input
+                      className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 px-2 py-1 flex-1"
+                      value={getEpisodeTitle(track.id)}
+                      onChange={(e) => setTvEpisodeTitle(track.id, e.target.value)}
+                      placeholder="Episode title..."
+                    />
+                  </div>
+                )}
 
                 {/* Extras categorization UI for library export mode */}
                 {showExtrasUI && isSelected && (

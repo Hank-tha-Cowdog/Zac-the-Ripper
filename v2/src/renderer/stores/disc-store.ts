@@ -68,6 +68,16 @@ export interface DiscSessionState {
   kodiTmdbId: number | null
   kodiSetName: string
   kodiSetOverview: string
+  // Custom metadata
+  customPosterPath: string | null
+  customPlot: string
+  customActors: string[]
+  // TV show episode metadata
+  tvEpisodeTitles: Record<number, string>
+  tvEpisodeNumbers: Record<number, number>
+  // Local file ingest
+  ingestFiles: string[]
+  isIngestMode: boolean
   // Music fields (audio CD)
   musicArtist: string
   musicAlbumArtist: string
@@ -88,6 +98,13 @@ const DEFAULT_DISC_SESSION: DiscSessionState = {
   kodiTmdbId: null,
   kodiSetName: '',
   kodiSetOverview: '',
+  customPosterPath: null,
+  customPlot: '',
+  customActors: [],
+  tvEpisodeTitles: {},
+  tvEpisodeNumbers: {},
+  ingestFiles: [],
+  isIngestMode: false,
   musicArtist: '',
   musicAlbumArtist: '',
   musicAlbum: '',
@@ -124,6 +141,9 @@ interface DiscState {
   setScanning: (v: boolean) => void
   setLoading: (v: boolean) => void
   setTmdbResult: (result: TMDBResult | null) => void
+  setTvEpisodeTitle: (trackId: number, title: string) => void
+  setTvEpisodeNumber: (trackId: number, num: number) => void
+  setIngestFiles: (files: string[]) => void
   updateDiscSession: (updates: Partial<DiscSessionState>) => void
   resetDiscSession: () => void
 }
@@ -245,6 +265,24 @@ export const useDiscStore = create<DiscState>((set, get) => ({
   setScanning: (scanning) => set({ scanning }),
   setLoading: (loading) => set({ loading }),
   setTmdbResult: (tmdbResult) => set({ tmdbResult }),
+  setTvEpisodeTitle: (trackId, title) =>
+    set((state) => ({
+      discSession: {
+        ...state.discSession,
+        tvEpisodeTitles: { ...state.discSession.tvEpisodeTitles, [trackId]: title }
+      }
+    })),
+  setTvEpisodeNumber: (trackId, num) =>
+    set((state) => ({
+      discSession: {
+        ...state.discSession,
+        tvEpisodeNumbers: { ...state.discSession.tvEpisodeNumbers, [trackId]: num }
+      }
+    })),
+  setIngestFiles: (files) =>
+    set((state) => ({
+      discSession: { ...state.discSession, ingestFiles: files }
+    })),
   updateDiscSession: (updates) =>
     set((state) => ({ discSession: { ...state.discSession, ...updates } })),
   resetDiscSession: () => set({ tmdbResult: null, discSession: { ...DEFAULT_DISC_SESSION } })

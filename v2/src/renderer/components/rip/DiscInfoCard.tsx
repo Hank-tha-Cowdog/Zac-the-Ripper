@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Disc3, AlertTriangle, Film, Music, Subtitles, Clock, Star, RefreshCw } from 'lucide-react'
+import { Disc3, AlertTriangle, Film, Music, Subtitles, Clock, Star, RefreshCw, HardDrive, Upload } from 'lucide-react'
 import { Card, Badge, Spinner, Tooltip, Button } from '../ui'
 import { useDiscStore } from '../../stores/disc-store'
 
@@ -23,6 +23,13 @@ function formatDuration(seconds: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`
 }
 
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+}
+
 function summarizeAudio(tracks: Array<{ codec: string; language: string; channels: string }>): string {
   if (tracks.length === 0) return 'None'
   const langs = [...new Set(tracks.map(t => t.language.slice(0, 3).toUpperCase()))]
@@ -31,12 +38,22 @@ function summarizeAudio(tracks: Array<{ codec: string; language: string; channel
   return `${tracks.length} track${tracks.length > 1 ? 's' : ''} (${langs.join(', ')}) ${mainCodec} ${mainCh}`
 }
 
+function summarizeAllLanguages(tracks: Array<{ audioTracks: Array<{ language: string }> }>): string {
+  const allLangs = new Set<string>()
+  for (const track of tracks) {
+    for (const audio of track.audioTracks) {
+      allLangs.add(audio.language.slice(0, 3).toUpperCase())
+    }
+  }
+  return [...allLangs].join(', ') || 'N/A'
+}
+
 interface DiscInfoCardProps {
   onRescan?: () => void
 }
 
 export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
-  const { discInfo, loading, tmdbResult, drives } = useDiscStore()
+  const { discInfo, loading, tmdbResult, drives, discSession } = useDiscStore()
   const [tmdbKeyMissing, setTmdbKeyMissing] = useState(false)
   const driveWithDisc = drives.find(d => d.discTitle || d.discType)
 
@@ -63,7 +80,6 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
   }
 
   if (!discInfo && driveWithDisc) {
-    // Disc is in drive but scan failed or timed out
     return (
       <Card className="flex flex-col items-center justify-center p-8 text-center">
         <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
@@ -119,6 +135,7 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
 
   const isAudioCD = discInfo.discType === 'AUDIO_CD'
   const mainTrack = discInfo.tracks[0]
+  const longestTrack = discInfo.tracks.reduce((a, b) => a.durationSeconds > b.durationSeconds ? a : b)
   const resolution = mainTrack?.resolution || ''
   const framerate = mainTrack?.framerate || ''
   const isInterlaced = discInfo.tracks.some((t) => t.isInterlaced)
@@ -127,6 +144,14 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
   const totalSubs = discInfo.tracks.reduce((sum, t) => sum + t.subtitleTracks.length, 0)
   const mainAudio = mainTrack?.audioTracks || []
   const totalDuration = discInfo.tracks.reduce((sum, t) => sum + t.durationSeconds, 0)
+  const totalSize = discInfo.tracks.reduce((sum, t) => sum + t.sizeBytes, 0)
+
+  // Determine poster source: custom > TMDB
+  const posterUrl = discSession.customPosterPath
+    ? `file://${discSession.customPosterPath}`
+    : tmdbResult?.poster_path
+      ? `https://image.tmdb.org/t/p/w342${tmdbResult.poster_path}`
+      : null
 
   // Audio CD display
   if (isAudioCD) {
@@ -173,14 +198,19 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
 
   return (
     <Card className="p-3">
-      <div className="flex gap-3">
-        {/* Poster */}
-        {tmdbResult?.poster_path && (
+      <div className="flex gap-4">
+        {/* Poster — larger */}
+        {posterUrl ? (
           <img
-            src={`https://image.tmdb.org/t/p/w185${tmdbResult.poster_path}`}
-            alt={tmdbResult.title}
-            className="w-24 h-36 rounded object-cover shrink-0 shadow-lg shadow-purple-500/10"
+            src={posterUrl}
+            alt={tmdbResult?.title || discInfo.title}
+            className="w-48 h-72 rounded object-cover shrink-0 shadow-lg shadow-purple-500/10"
           />
+        ) : (
+          <div className="w-48 h-72 rounded bg-zinc-800/50 border border-zinc-700/50 shrink-0 flex flex-col items-center justify-center text-zinc-600">
+            <Film className="w-8 h-8 mb-2" />
+            <span className="text-[10px]">No Poster</span>
+          </div>
         )}
 
         {/* Main info */}
@@ -244,6 +274,11 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
                   {tmdbResult.overview}
                 </p>
               )}
+              {tmdbResult.belongs_to_collection && (
+                <span className="text-[10px] text-blue-400 font-mono">
+                  Collection: {tmdbResult.belongs_to_collection.name}
+                </span>
+              )}
             </div>
           )}
 
@@ -261,10 +296,37 @@ export function DiscInfoCard({ onRescan }: DiscInfoCardProps) {
             </div>
             <div className="flex items-center gap-1.5">
               <Clock className="w-2.5 h-2.5 text-zinc-500" />
-              <span className="text-zinc-500">Duration</span>
-              <span className="text-zinc-300 font-mono">{mainTrack ? formatDuration(mainTrack.durationSeconds) : '—'}</span>
+              <span className="text-zinc-500">Main</span>
+              <span className="text-zinc-300 font-mono">{longestTrack ? formatDuration(longestTrack.durationSeconds) : '—'}</span>
             </div>
             <div className="flex items-center gap-1.5">
+              <Clock className="w-2.5 h-2.5 text-zinc-500" />
+              <span className="text-zinc-500">Total</span>
+              <span className="text-zinc-300 font-mono">{formatDuration(totalDuration)}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <HardDrive className="w-2.5 h-2.5 text-zinc-500" />
+              <span className="text-zinc-500">Total Size</span>
+              <span className="text-zinc-300 font-mono">{formatSize(totalSize)}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Film className="w-2.5 h-2.5 text-zinc-500" />
+              <span className="text-zinc-500">Tracks</span>
+              <span className="text-zinc-300 font-mono">{discInfo.trackCount}</span>
+            </div>
+            {longestTrack?.chapters > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Film className="w-2.5 h-2.5 text-zinc-500" />
+                <span className="text-zinc-500">Chapters</span>
+                <span className="text-zinc-300 font-mono">{longestTrack.chapters}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5">
+              <Music className="w-2.5 h-2.5 text-zinc-500" />
+              <span className="text-zinc-500">Languages</span>
+              <span className="text-zinc-300 font-mono truncate">{summarizeAllLanguages(discInfo.tracks)}</span>
+            </div>
+            <div className="flex items-center gap-1.5 col-span-2">
               <span className="w-2.5 h-2.5 text-zinc-600 text-center font-mono text-[8px] font-bold">#</span>
               <span className="text-zinc-500">Disc ID</span>
               <span className="text-zinc-300 font-mono truncate">{discInfo.discId}</span>
