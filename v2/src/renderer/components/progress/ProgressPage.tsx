@@ -26,7 +26,7 @@ export function ProgressPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="text-2xl font-bold text-purple-400">Progress</h1>
+      <h1 className="text-2xl font-bold text-purple-400 font-display">Progress</h1>
 
       <PipelineView activeStage={activeStage} />
 

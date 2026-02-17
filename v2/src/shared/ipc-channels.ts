@@ -53,6 +53,8 @@ export const IPC = {
 
   // Filesystem
   FS_SELECT_DIRECTORY: 'fs:select-directory',
+  FS_SELECT_FILE: 'fs:select-file',
+  FS_SELECT_FILES: 'fs:select-files',
   FS_GET_DISK_SPACE: 'fs:get-disk-space',
   FS_OPEN_PATH: 'fs:open-path',
 

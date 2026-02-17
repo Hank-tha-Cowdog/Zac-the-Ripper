@@ -154,6 +154,26 @@ export function useRipSettings() {
     [saveSetting]
   )
 
+  // --- Persistent: TV show settings ---
+  const tvSeason = settings['rip.tv_season'] || '1'
+  const setTvSeason = useCallback(
+    (v: string) => saveSetting('rip.tv_season', v),
+    [saveSetting]
+  )
+
+  const tvStartEpisode = settings['rip.tv_start_episode'] || '1'
+  const setTvStartEpisode = useCallback(
+    (v: string) => saveSetting('rip.tv_start_episode', v),
+    [saveSetting]
+  )
+
+  // --- Persistent: local file ingest ---
+  const localIngestMode = settings['general.mode_local_ingest'] === 'true'
+  const setLocalIngestMode = useCallback(
+    (v: boolean) => saveSetting('general.mode_local_ingest', String(v)),
+    [saveSetting]
+  )
+
   return {
     // Persistent
     modes,
@@ -172,6 +192,16 @@ export function useRipSettings() {
     setKodiCustomEdition,
     kodiIsExtrasDisc,
     setKodiIsExtrasDisc,
+
+    // TV show
+    tvSeason,
+    setTvSeason,
+    tvStartEpisode,
+    setTvStartEpisode,
+
+    // Local ingest
+    localIngestMode,
+    setLocalIngestMode,
 
     // Disc-session
     kodiTitle: discSession.kodiTitle,

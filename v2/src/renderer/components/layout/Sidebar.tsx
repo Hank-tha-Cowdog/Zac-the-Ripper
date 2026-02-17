@@ -37,7 +37,7 @@ export function Sidebar() {
   return (
     <aside className="w-48 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
       <div className="p-4 border-b border-zinc-800 drag-region">
-        <h1 className="text-lg font-bold text-purple-400 no-drag">Zac the Ripper</h1>
+        <h1 className="text-lg font-bold text-purple-400 font-display no-drag">Zac the Ripper</h1>
         <span className="label-tech">v2.0</span>
       </div>
 

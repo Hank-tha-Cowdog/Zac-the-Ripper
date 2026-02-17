@@ -2,9 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DiscInfoCard } from './DiscInfoCard'
 import { TrackSelector } from './TrackSelector'
-import { RipModesPanel } from './RipModesPanel'
+import { RipConfigPanel } from './RipConfigPanel'
 import { RipActionBar } from './RipActionBar'
-import { KodiOptionsPanel } from './KodiOptionsPanel'
 import { AudioConfigPanel } from './AudioConfigPanel'
 import type { LibrarySelection } from './LibraryBrowser'
 import { useDiscStore } from '../../stores/disc-store'
@@ -14,7 +13,10 @@ import { useDiscDetection } from '../../hooks/useDiscDetection'
 
 export function RipPage() {
   const navigate = useNavigate()
-  const { discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession, discSession, trackCategories, trackNames } = useDiscStore()
+  const {
+    discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession,
+    discSession, trackCategories, trackNames
+  } = useDiscStore()
   const { addJob } = useJobsStore()
   const [isRipping, setIsRipping] = useState(false)
   const [standbyMessage, setStandbyMessage] = useState<string | null>(null)
@@ -54,7 +56,10 @@ export function RipPage() {
     soundVersion, setSoundVersion,
     customSoundVersion, setCustomSoundVersion,
     discNumber, setDiscNumber,
-    totalDiscs, setTotalDiscs
+    totalDiscs, setTotalDiscs,
+    tvSeason, setTvSeason,
+    tvStartEpisode, setTvStartEpisode,
+    localIngestMode, setLocalIngestMode
   } = useRipSettings()
 
   const handleEject = async () => {
@@ -93,6 +98,11 @@ export function RipPage() {
           sessionDiscId: discInfo?.discId ?? '__user_pending__'
         })
 
+        // Auto-populate synopsis from TMDB
+        if (details?.overview && !discSession.customPlot) {
+          updateDiscSession({ customPlot: details.overview })
+        }
+
         // Auto-populate collection from TMDB if NFO didn't have it
         if (details?.belongs_to_collection?.name && !setName) {
           setKodiSetName(details.belongs_to_collection.name)
@@ -106,6 +116,35 @@ export function RipPage() {
         console.warn('Failed to fetch TMDB details for library movie:', err)
       }
     }
+  }
+
+  const handleCustomPosterSelect = async () => {
+    const path = await window.ztr.fs.selectFile('Select Poster Image', [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }
+    ])
+    if (path) {
+      updateDiscSession({ customPosterPath: path })
+    }
+  }
+
+  const handleSelectIngestFiles = async () => {
+    const files = await window.ztr.fs.selectFiles('Select Video Files or VIDEO_TS Folder', {
+      filters: [
+        { name: 'Video Files', extensions: ['mkv', 'mp4', 'avi', 'm4v', 'ts'] }
+      ],
+      multiSelections: true
+    })
+    if (files && files.length > 0) {
+      updateDiscSession({
+        ingestFiles: [...discSession.ingestFiles, ...files]
+      })
+    }
+  }
+
+  const handleRemoveIngestFile = (index: number) => {
+    updateDiscSession({
+      ingestFiles: discSession.ingestFiles.filter((_, i) => i !== index)
+    })
   }
 
   const handleAudioRip = async () => {
@@ -163,15 +202,18 @@ export function RipPage() {
   }
 
   const handleRip = async () => {
-    if (selectedDrive === null || selectedTracks.length === 0) return
+    // For ingest mode, don't require disc drive
+    const isIngest = localIngestMode && discSession.ingestFiles.length > 0
+    if (!isIngest && (selectedDrive === null || selectedTracks.length === 0)) return
+    if (isIngest && discSession.ingestFiles.length === 0) return
 
     // Delegate to audio rip for audio CDs
-    if (isAudioCD) {
+    if (isAudioCD && !isIngest) {
       return handleAudioRip()
     }
 
     setIsRipping(true)
-    setStandbyMessage('Standby — your disc drive is coming up to speed')
+    setStandbyMessage(isIngest ? 'Standby — preparing to process local files' : 'Standby — your disc drive is coming up to speed')
 
     const enabledModes = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
     const outputDir = outputPaths.mkv_rip || ''
@@ -181,7 +223,7 @@ export function RipPage() {
     const longestTrackId = discInfo && discInfo.tracks.length > 0
       ? discInfo.tracks.reduce((a, b) => a.durationSeconds > b.durationSeconds ? a : b).id
       : -1
-    const trackMeta = isLibraryMode && selectedTracks.length > 1
+    const trackMeta = isLibraryMode && !isIngest && selectedTracks.length > 1 && kodiMediaType !== 'tvshow'
       ? selectedTracks.map((id, idx) => {
           const cat = trackCategories[id] || (id === longestTrackId ? 'main' : 'featurette')
           const track = discInfo?.tracks.find(t => t.id === id)
@@ -197,16 +239,30 @@ export function RipPage() {
         })
       : undefined
 
+    // Build TV show options when mediaType is tvshow
+    const tvOptions = isLibraryMode && kodiMediaType === 'tvshow' ? {
+      showName: kodiTitle,
+      year: kodiYear,
+      season: parseInt(tvSeason) || 1,
+      episodes: selectedTracks.map((id, idx) => ({
+        trackId: id,
+        episodeNumber: discSession.tvEpisodeNumbers[id] ?? (parseInt(tvStartEpisode) || 1) + idx,
+        episodeTitle: discSession.tvEpisodeTitles[id] || ''
+      }))
+    } : undefined
+
     try {
       const result = await window.ztr.rip.start({
-        discIndex: selectedDrive,
-        titleIds: selectedTracks,
+        discIndex: isIngest ? 0 : selectedDrive,
+        titleIds: isIngest ? [] : selectedTracks,
         outputDir,
         modes: enabledModes,
         preserveInterlaced,
         convertSubsToSrt,
         trackMeta,
-        kodiOptions: (modes.kodi_export || modes.jellyfin_export || modes.plex_export) ? {
+        isIngest,
+        ingestFiles: isIngest ? discSession.ingestFiles : undefined,
+        kodiOptions: isLibraryMode ? {
           mediaType: kodiMediaType,
           title: kodiTitle,
           year: kodiYear,
@@ -217,7 +273,11 @@ export function RipPage() {
           setOverview: kodiSetOverview || undefined,
           soundVersion: soundVersion === 'Custom' ? customSoundVersion : soundVersion || undefined,
           discNumber: parseInt(discNumber) || undefined,
-          totalDiscs: parseInt(totalDiscs) || undefined
+          totalDiscs: parseInt(totalDiscs) || undefined,
+          customPlot: discSession.customPlot || undefined,
+          customActors: discSession.customActors.filter(a => a.trim()) || undefined,
+          customPosterPath: discSession.customPosterPath || undefined,
+          tvOptions
         } : undefined
       })
 
@@ -228,7 +288,7 @@ export function RipPage() {
           type: enabledModes[0] || 'mkv_rip',
           status: 'running',
           percentage: 0,
-          message: 'Disc drive spinning up...',
+          message: isIngest ? 'Processing local files...' : 'Disc drive spinning up...',
           movieTitle: kodiTitle || undefined,
           movieYear: kodiYear || undefined,
           collectionName: kodiSetName || undefined,
@@ -248,35 +308,34 @@ export function RipPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="text-2xl font-bold text-purple-400">Rip Disc</h1>
+      <h1 className="text-2xl font-bold text-purple-400 font-display">Rip Disc</h1>
 
-      <div className="grid grid-cols-3 gap-4">
-        <div className="col-span-2 space-y-4">
+      <div className="grid grid-cols-5 gap-4">
+        <div className="col-span-3 space-y-4">
           <DiscInfoCard onRescan={rescanDisc} />
           <TrackSelector
             isLibraryMode={!isAudioCD && (modes.kodi_export || modes.jellyfin_export || modes.plex_export)}
             movieTitle={isAudioCD ? discSession.musicAlbum : kodiTitle}
+            mediaType={kodiMediaType}
+            tvSeason={tvSeason}
+            tvStartEpisode={tvStartEpisode}
           />
         </div>
 
-        <div className="space-y-4">
+        <div className="col-span-2 space-y-4">
           {isAudioCD ? (
             <AudioConfigPanel
               musicOutputPath={musicOutputPath}
               onMusicOutputPathChange={handleMusicOutputPathChange}
             />
           ) : (
-            <>
-          <RipModesPanel
-            modes={modes}
-            onModesChange={setModes}
-            convertSubsToSrt={convertSubsToSrt}
-            onConvertSubsToSrtChange={setConvertSubsToSrt}
-            outputPaths={outputPaths}
-            onOutputPathChange={setOutputPath}
-          />
-          {(modes.kodi_export || modes.jellyfin_export || modes.plex_export) && (
-            <KodiOptionsPanel
+            <RipConfigPanel
+              modes={modes}
+              onModesChange={setModes}
+              convertSubsToSrt={convertSubsToSrt}
+              onConvertSubsToSrtChange={setConvertSubsToSrt}
+              outputPaths={outputPaths}
+              onOutputPathChange={setOutputPath}
               mediaType={kodiMediaType}
               onMediaTypeChange={setKodiMediaType}
               title={kodiTitle}
@@ -303,6 +362,10 @@ export function RipPage() {
                   kodiTmdbId: r.id,
                   sessionDiscId: discInfo?.discId ?? '__user_pending__'
                 })
+                // Auto-fill plot
+                if (r.overview && !discSession.customPlot) {
+                  updateDiscSession({ customPlot: r.overview })
+                }
                 // Cache TMDB result for disc recognition
                 if (discInfo?.discId) {
                   window.ztr.disc.setTmdbCache(discInfo.discId, tmdbResult).catch(() => {})
@@ -325,11 +388,22 @@ export function RipPage() {
               onDiscNumberChange={setDiscNumber}
               totalDiscs={totalDiscs}
               onTotalDiscsChange={setTotalDiscs}
-              convertSubsToSrt={convertSubsToSrt}
-              onConvertSubsToSrtChange={setConvertSubsToSrt}
+              tvSeason={tvSeason}
+              onTvSeasonChange={setTvSeason}
+              tvStartEpisode={tvStartEpisode}
+              onTvStartEpisodeChange={setTvStartEpisode}
+              customPlot={discSession.customPlot}
+              onCustomPlotChange={(v) => updateDiscSession({ customPlot: v })}
+              customActors={discSession.customActors}
+              onCustomActorsChange={(v) => updateDiscSession({ customActors: v })}
+              customPosterPath={discSession.customPosterPath}
+              onCustomPosterSelect={handleCustomPosterSelect}
+              localIngestMode={localIngestMode}
+              onLocalIngestModeChange={setLocalIngestMode}
+              ingestFiles={discSession.ingestFiles}
+              onSelectIngestFiles={handleSelectIngestFiles}
+              onRemoveIngestFile={handleRemoveIngestFile}
             />
-          )}
-            </>
           )}
         </div>
       </div>
