@@ -295,6 +295,40 @@ export class FFmpegRipperService {
       }
     }
 
+    // Last resort: file-enumeration fallback when all ffprobe probes failed.
+    // Discovers VTS numbers purely from the filesystem (no ffprobe needed) and maps
+    // tracks sequentially. This is the natural layout for TV show DVDs where each
+    // episode is its own VTS, and also handles damaged discs where probing hangs.
+    const finalUnmapped = tracks.filter(t => !result.has(t.id))
+    if (finalUnmapped.length > 0) {
+      const vtsEntries = this.enumerateVTSFromFiles(videoTsDir)
+      // Exclude VTS numbers already assigned by earlier methods
+      const assignedVts = new Set(result.values())
+      const availableVts = vtsEntries.filter(e => !assignedVts.has(e.vts))
+
+      if (availableVts.length > 0) {
+        log.info(`[ffmpeg-rip] File-enumeration fallback: ${availableVts.length} non-trivial VTS(es) found, ${finalUnmapped.length} track(s) unmapped`)
+
+        if (finalUnmapped.length === 1) {
+          // Single track: use the largest available VTS by file size
+          const largest = availableVts.reduce((a, b) => a.sizeMB > b.sizeMB ? a : b)
+          result.set(finalUnmapped[0].id, largest.vts)
+          log.info(`[ffmpeg-rip] File fallback: title ${finalUnmapped[0].id} → VTS ${largest.vts} (${largest.sizeMB.toFixed(0)} MB, largest by size)`)
+        } else {
+          // Multiple tracks: sequential assignment — TV DVDs typically lay out episodes in VTS order
+          for (let i = 0; i < finalUnmapped.length && i < availableVts.length; i++) {
+            result.set(finalUnmapped[i].id, availableVts[i].vts)
+            log.info(`[ffmpeg-rip] File fallback: title ${finalUnmapped[i].id} → VTS ${availableVts[i].vts} (${availableVts[i].sizeMB.toFixed(0)} MB, sequential)`)
+          }
+          // If more tracks than VTS files, remaining tracks stay unmapped
+          const remaining = finalUnmapped.length - availableVts.length
+          if (remaining > 0) {
+            log.warn(`[ffmpeg-rip] File fallback: ${remaining} track(s) still unmapped (more tracks than VTS files)`)
+          }
+        }
+      }
+    }
+
     return result
   }
 
@@ -338,7 +372,7 @@ export class FFmpegRipperService {
           log.info(`[ffmpeg-rip] VTS ${vtsNumber}: ${duration.toFixed(1)}s (${allParts.length} parts)`)
         }
       } catch (err) {
-        log.debug(`[ffmpeg-rip] Could not probe VTS ${vtsNumber}: ${err}`)
+        log.warn(`[ffmpeg-rip] Could not probe VTS ${vtsNumber}: ${err}`)
       }
     }
 
@@ -366,6 +400,48 @@ export class FFmpegRipperService {
     }
 
     return largest
+  }
+
+  /**
+   * Enumerate VTS numbers purely from filesystem (no ffprobe).
+   * Used as last-resort fallback when probe-based matching fails entirely
+   * (e.g. damaged disc causes ffprobe timeouts).
+   * Returns VTS entries sorted by VTS number, filtered to skip tiny/menu VOBs.
+   */
+  private enumerateVTSFromFiles(videoTsDir: string): Array<{ vts: number; sizeMB: number }> {
+    const entries: Array<{ vts: number; sizeMB: number }> = []
+
+    try {
+      const files = readdirSync(videoTsDir)
+      const vtsStarters = files.filter(f => /^VTS_\d{2}_1\.VOB$/.test(f)).sort()
+
+      for (const starter of vtsStarters) {
+        const vtsMatch = starter.match(/^VTS_(\d{2})_1\.VOB$/)
+        if (!vtsMatch) continue
+        const vtsNumber = parseInt(vtsMatch[1], 10)
+
+        const allParts = this.findVOBFiles(videoTsDir, vtsNumber)
+        const totalSize = allParts.reduce((sum, f) => {
+          try { return sum + statSync(f).size } catch { return sum }
+        }, 0)
+        const sizeMB = totalSize / (1024 * 1024)
+
+        // Skip tiny VOBs — menus/nav are typically < 10MB
+        if (sizeMB < 10) {
+          log.info(`[ffmpeg-rip] File enum: VTS ${vtsNumber} skipped (${sizeMB.toFixed(1)} MB, likely menu)`)
+          continue
+        }
+
+        log.info(`[ffmpeg-rip] File enum: VTS ${vtsNumber} — ${allParts.length} part(s), ${sizeMB.toFixed(0)} MB`)
+        entries.push({ vts: vtsNumber, sizeMB })
+      }
+    } catch (err) {
+      log.error(`[ffmpeg-rip] Failed to enumerate VTS files: ${err}`)
+    }
+
+    // Sort by VTS number (sequential assignment for TV episodes)
+    entries.sort((a, b) => a.vts - b.vts)
+    return entries
   }
 
   // ─── FFmpeg VOB → MKV ripping ──────────────────────────────────────
