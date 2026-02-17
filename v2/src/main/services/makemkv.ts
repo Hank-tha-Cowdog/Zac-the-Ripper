@@ -146,7 +146,8 @@ export class MakeMKVService {
     // and report them after completion. Only abort if progress truly
     // stalls (process stuck) or the disc is extremely damaged.
     const MAX_TOTAL_ERRORS = 100       // Abort threshold for severely damaged discs
-    const PROGRESS_STALL_MS = 5 * 60 * 1000  // 5 min no-output = stuck (safety net)
+    const PROGRESS_STALL_IDLE_MS = 5 * 60 * 1000   // 5 min no-output + idle CPU = stuck
+    const PROGRESS_STALL_ACTIVE_MS = 15 * 60 * 1000 // 15 min no-output but active CPU = safety cap
     const HEALTH_CHECK_INTERVAL_MS = 15000    // Check process health every 15s
     const ZERO_CPU_KILL_COUNT = 3             // Kill after 3 consecutive 0% CPU readings
     const ZERO_CPU_SILENCE_GATE_MS = 60000    // AND at least 60s of no progress
@@ -316,9 +317,16 @@ export class MakeMKVService {
         const stalledMs = Date.now() - lastProgressTime
         const stalledSec = Math.round(stalledMs / 1000)
 
-        // Safety net: absolute stall timeout (no output at all for 5 min)
-        if (stalledMs >= PROGRESS_STALL_MS) {
-          log.error(`[rip] Aborting title ${titleId}: no activity for ${(stalledMs / 60000).toFixed(0)} minutes — process appears stuck`)
+        // Safety net: stall timeout with CPU-awareness.
+        // If CPU is idle (consecutiveZeroCpu > 0): kill after 5 min — likely deadlocked.
+        // If CPU is active (consecutiveZeroCpu === 0): wait up to 15 min — MakeMKV is
+        // probably reading disc structure or handling a large title.
+        const effectiveStallMs = consecutiveZeroCpu > 0 ? PROGRESS_STALL_IDLE_MS : PROGRESS_STALL_ACTIVE_MS
+        if (stalledMs >= effectiveStallMs) {
+          const reason = consecutiveZeroCpu > 0
+            ? `no activity for ${(stalledMs / 60000).toFixed(0)} min with idle CPU — process appears stuck`
+            : `no output for ${(stalledMs / 60000).toFixed(0)} min despite active CPU — safety timeout reached`
+          log.error(`[rip] Aborting title ${titleId}: ${reason}`)
           failed = true
           proc.kill()
           return
