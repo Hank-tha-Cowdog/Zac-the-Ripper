@@ -517,9 +517,10 @@ export class FFmpegRipperService {
         onStderr: (line) => {
           log.debug(`[ffmpeg-rip] ${line}`)
           stderrLines.push(line)
-          // Also parse progress from stderr (ffmpeg sometimes reports there)
+          // Any stderr output means FFmpeg is alive (analysis, stream info, warnings).
+          // Critical for large inputs where the analysis phase can take several minutes.
+          lastActivityTime = Date.now()
           if (line.includes('speed=')) {
-            lastActivityTime = Date.now()
             const m = line.match(/speed=\s*([\d.]+)x/)
             if (m) lastSpeed = parseFloat(m[1])
           }
