@@ -22,7 +22,7 @@ export function PlexSettings({ settings, onSave }: PlexSettingsProps) {
           <div className="flex flex-col gap-1 flex-1">
             <LabelWithTooltip
               label="Library Root Path"
-              tooltip="The root folder of your Plex media library. Movies will be placed in a Movies/ subfolder with NFO metadata and artwork. Plex uses the same folder structure and naming conventions as Kodi and Jellyfin."
+              tooltip="The root folder for Zac the Ripper output. Movies go into a Movies/ subfolder and TV shows go into a TV Shows/ subfolder. You need TWO Plex libraries: one 'Movies' type pointed at the Movies/ subfolder, and one 'TV Shows' type pointed at the TV Shows/ subfolder."
               className="label-tech"
             />
             <input
@@ -37,9 +37,12 @@ export function PlexSettings({ settings, onSave }: PlexSettingsProps) {
           </Button>
         </div>
 
-        <p className="text-[10px] text-zinc-600 font-mono leading-relaxed">
-          Plex reads Kodi-style NFO files and artwork. The TMDB API key from Kodi Settings is shared for metadata lookups.
-        </p>
+        <div className="text-[10px] text-zinc-600 font-mono leading-relaxed space-y-1">
+          <p>Zac the Ripper creates two subfolders inside this path:</p>
+          <p className="text-zinc-500 ml-2">Movies/ &mdash; for movie rips (Plex library type: <span className="text-amber-500">Movies</span>)</p>
+          <p className="text-zinc-500 ml-2">TV Shows/ &mdash; for TV series (Plex library type: <span className="text-amber-500">TV Shows</span>)</p>
+          <p className="text-amber-500/70 mt-1">You must create two separate libraries in Plex &mdash; one for each subfolder.</p>
+        </div>
       </div>
     </Card>
   )

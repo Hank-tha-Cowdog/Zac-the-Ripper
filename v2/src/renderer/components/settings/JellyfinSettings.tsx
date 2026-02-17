@@ -22,7 +22,7 @@ export function JellyfinSettings({ settings, onSave }: JellyfinSettingsProps) {
           <div className="flex flex-col gap-1 flex-1">
             <LabelWithTooltip
               label="Library Root Path"
-              tooltip="The root folder of your Jellyfin media library. Movies will be placed in a Movies/ subfolder with NFO metadata and artwork, following Jellyfin's expected naming conventions (identical to Kodi format)."
+              tooltip="The root folder for Zac the Ripper output. Movies go into a Movies/ subfolder and TV shows go into a TV Shows/ subfolder. You need TWO Jellyfin libraries: one 'Movies' type pointed at the Movies/ subfolder, and one 'Shows' type pointed at the TV Shows/ subfolder."
               className="label-tech"
             />
             <input
@@ -37,9 +37,12 @@ export function JellyfinSettings({ settings, onSave }: JellyfinSettingsProps) {
           </Button>
         </div>
 
-        <p className="text-[10px] text-zinc-600 font-mono leading-relaxed">
-          Jellyfin reads Kodi-style NFO files and artwork. The TMDB API key from Kodi Settings is shared for metadata lookups.
-        </p>
+        <div className="text-[10px] text-zinc-600 font-mono leading-relaxed space-y-1">
+          <p>Zac the Ripper creates two subfolders inside this path:</p>
+          <p className="text-zinc-500 ml-2">Movies/ &mdash; for movie rips (Jellyfin library type: <span className="text-amber-500">Movies</span>)</p>
+          <p className="text-zinc-500 ml-2">TV Shows/ &mdash; for TV series (Jellyfin library type: <span className="text-amber-500">Shows</span>)</p>
+          <p className="text-amber-500/70 mt-1">You must create two separate libraries in Jellyfin &mdash; one for each subfolder.</p>
+        </div>
       </div>
     </Card>
   )
