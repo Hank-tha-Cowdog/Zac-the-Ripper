@@ -22,7 +22,7 @@ export function KodiSettings({ settings, onSave }: KodiSettingsProps) {
           <div className="flex flex-col gap-1 flex-1">
             <LabelWithTooltip
               label="Library Root Path"
-              tooltip="The root folder of your Kodi media library. Movies will be placed in a Movies/ subfolder and TV shows in a TV Shows/ subfolder, following Kodi's expected naming conventions."
+              tooltip="The root folder for Zac the Ripper output. Movies go into Movies/ and TV shows go into TV Shows/. In Kodi, add both subfolders as separate sources — one as 'Movies' and one as 'TV Shows' content type."
               className="label-tech"
             />
             <input
