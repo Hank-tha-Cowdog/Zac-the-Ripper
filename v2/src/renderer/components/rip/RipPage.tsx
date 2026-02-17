@@ -223,33 +223,47 @@ export function RipPage() {
     const longestTrackId = discInfo && discInfo.tracks.length > 0
       ? discInfo.tracks.reduce((a, b) => a.durationSeconds > b.durationSeconds ? a : b).id
       : -1
-    const trackMeta = isLibraryMode && !isIngest && selectedTracks.length > 1 && kodiMediaType !== 'tvshow'
-      ? selectedTracks.map((id, idx) => {
-          const cat = trackCategories[id] || (id === longestTrackId ? 'main' : 'featurette')
+
+    // For TV shows, get the default category for each track
+    const getTrackCategory = (id: number) => {
+      if (trackCategories[id]) return trackCategories[id]
+      if (kodiMediaType === 'tvshow') return 'episode'
+      return id === longestTrackId ? 'main' : 'featurette'
+    }
+
+    // Build track metadata for non-episode/non-main tracks (extras)
+    const extrasTrackIds = isLibraryMode && !isIngest && selectedTracks.length > 1
+      ? selectedTracks.filter(id => {
+          const cat = getTrackCategory(id)
+          return cat !== 'main' && cat !== 'episode'
+        })
+      : []
+    const trackMeta = extrasTrackIds.length > 0
+      ? extrasTrackIds.map((id, idx) => {
+          const cat = getTrackCategory(id)
           const track = discInfo?.tracks.find(t => t.id === id)
           const isGeneric = !track?.title || /^Title\s+\d+$/i.test(track.title)
-          const extrasIndex = selectedTracks.filter(tid => {
-            const tidCat = trackCategories[tid] || (tid === longestTrackId ? 'main' : 'featurette')
-            return tidCat !== 'main'
-          }).indexOf(id)
           const name = trackNames[id] || (isGeneric
-            ? `${kodiTitle || 'Bonus'} - Bonus ${String(extrasIndex + 1).padStart(3, '0')}`
+            ? `${kodiTitle || 'Bonus'} - Bonus ${String(idx + 1).padStart(3, '0')}`
             : track?.title || `Bonus ${String(idx + 1).padStart(3, '0')}`)
           return { titleId: id, category: cat, name }
         })
       : undefined
 
-    // Build TV show options when mediaType is tvshow
-    const tvOptions = isLibraryMode && kodiMediaType === 'tvshow' ? {
-      showName: kodiTitle,
-      year: kodiYear,
-      season: parseInt(tvSeason) || 1,
-      episodes: selectedTracks.map((id, idx) => ({
-        trackId: id,
-        episodeNumber: discSession.tvEpisodeNumbers[id] ?? (parseInt(tvStartEpisode) || 1) + idx,
-        episodeTitle: discSession.tvEpisodeTitles[id] || ''
-      }))
-    } : undefined
+    // Build TV show options — only include episode-categorized tracks
+    const tvOptions = isLibraryMode && kodiMediaType === 'tvshow' ? (() => {
+      const episodeTracks = selectedTracks.filter(id => getTrackCategory(id) === 'episode')
+      return {
+        showName: kodiTitle,
+        year: kodiYear,
+        season: parseInt(tvSeason) || 1,
+        episodes: episodeTracks.map((id, idx) => ({
+          trackId: id,
+          episodeNumber: discSession.tvEpisodeNumbers[id] ?? (parseInt(tvStartEpisode) || 1) + idx,
+          episodeTitle: discSession.tvEpisodeTitles[id] || ''
+        }))
+      }
+    })() : undefined
 
     try {
       const result = await window.ztr.rip.start({
@@ -272,9 +286,10 @@ export function RipPage() {
             edition: kodiEdition === 'Custom' ? kodiCustomEdition : kodiEdition || undefined,
             isExtrasDisc: kodiIsExtrasDisc || undefined,
             soundVersion: soundVersion === 'Custom' ? customSoundVersion : soundVersion || undefined,
-            discNumber: parseInt(discNumber) || undefined,
-            totalDiscs: parseInt(totalDiscs) || undefined,
           } : {}),
+          // Disc number applies to both movies and TV box sets
+          discNumber: parseInt(discNumber) || undefined,
+          totalDiscs: parseInt(totalDiscs) || undefined,
           setName: kodiSetName || undefined,
           setOverview: kodiSetOverview || undefined,
           customPlot: discSession.customPlot || undefined,
