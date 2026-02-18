@@ -136,6 +136,23 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
 
         <div className="flex flex-col gap-1">
           <LabelWithTooltip
+            label="Preserve Source Resolution"
+            tooltip="When enabled, 4K UHD Blu-ray content is encoded at its native resolution (3840×2160) with HDR metadata preserved. When disabled, UHD content is downscaled to 1080p and HDR is converted to SDR. Does not affect DVD or standard Blu-ray."
+            className="label-tech"
+          />
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="accent-purple-500"
+              checked={(settings['encoding.preserve_resolution'] ?? 'true') !== 'false'}
+              onChange={(e) => onSave('encoding.preserve_resolution', e.target.checked ? 'true' : 'false')}
+            />
+            <span className="text-xs text-zinc-400">Keep 4K UHD at native resolution (recommended)</span>
+          </label>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <LabelWithTooltip
             label="FFV1 Threads"
             tooltip="Number of CPU threads for FFV1 lossless encoding. 0 = auto-detect (uses all available cores). FFV1 uses sliced threading for parallel encoding without quality loss."
             className="label-tech"

@@ -91,6 +91,7 @@ export const DEFAULT_SETTINGS: Record<string, { value: string; category: string 
   'encoding.ffv1_threads': { value: '0', category: 'encoding' },
   'encoding.hw_accel': { value: 'videotoolbox', category: 'encoding' },
   'encoding.preserve_interlaced': { value: 'false', category: 'encoding' },
+  'encoding.preserve_resolution': { value: 'true', category: 'encoding' },
   'encoding.convert_subs_to_srt': { value: 'false', category: 'encoding' },
 
   // Kodi

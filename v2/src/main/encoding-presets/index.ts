@@ -67,6 +67,7 @@ function getH264Args(context: EncodingContext): string[] {
   const bufsize = getSetting('encoding.h264_bufsize') || '30M'
   const hwAccel = getSetting('encoding.hw_accel') || 'videotoolbox'
   const vtQuality = getSetting('encoding.h264_vt_quality') || '65'
+  const preserveResolution = getSetting('encoding.preserve_resolution') !== 'false'
 
   const args: string[] = []
   const vfFilters: string[] = []
@@ -89,10 +90,9 @@ function getH264Args(context: EncodingContext): string[] {
     vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
   }
 
-  // Check if UHD needs downscaling to 1080p
+  // UHD handling: downscale to 1080p unless preserve_resolution is enabled
   const isUHD = video && (video.width > 1920 || video.height > 1080)
-  if (isUHD) {
-    // Use software scaling for chroma accuracy (VideoToolbox scaler has chroma position bugs)
+  if (isUHD && !preserveResolution) {
     vfFilters.push('scale=1920:-2:flags=lanczos')
     if (video.isHDR) {
       vfFilters.push('colorspace=all=bt709:iall=bt2020ncl')
@@ -179,6 +179,15 @@ function getH264Args(context: EncodingContext): string[] {
     )
   }
 
+  // Preserve HDR/color metadata when keeping UHD at source resolution
+  if (isUHD && preserveResolution && video && hwAccel !== 'software') {
+    args.push(
+      '-color_primaries', video.colorPrimaries || 'bt2020',
+      '-color_trc', video.colorTransfer || 'smpte2084',
+      '-colorspace', video.colorSpace || 'bt2020nc'
+    )
+  }
+
   // Audio: passthrough (preserve original AC3/DTS/TrueHD)
   args.push('-c:a', 'copy')
 
@@ -198,6 +207,7 @@ function getHEVCArgs(context: EncodingContext): string[] {
   const quality = getSetting('encoding.hevc_quality') || '65'
   const hwAccel = getSetting('encoding.hw_accel') || 'videotoolbox'
   const crf = getSetting('encoding.h264_crf') || '18' // Used as CRF fallback for software/nvenc/qsv/vaapi
+  const preserveResolution = getSetting('encoding.preserve_resolution') !== 'false'
 
   const args: string[] = []
   const vfFilters: string[] = []
@@ -223,9 +233,9 @@ function getHEVCArgs(context: EncodingContext): string[] {
     vfFilters.push(`colorspace=all=bt709:iall=${iall}`)
   }
 
-  // Check if UHD needs downscaling to 1080p
+  // UHD handling: downscale to 1080p unless preserve_resolution is enabled
   const isUHD = video && (video.width > 1920 || video.height > 1080)
-  if (isUHD) {
+  if (isUHD && !preserveResolution) {
     vfFilters.push('scale=1920:-2:flags=lanczos')
     if (video.isHDR) {
       vfFilters.push('colorspace=all=bt709:iall=bt2020ncl')
