@@ -707,14 +707,16 @@ export class JobQueueService {
 
           const epCode = `S${String(tv.season).padStart(2, '0')}E${String(epInfo.episodeNumber).padStart(2, '0')}`
           const epTitle = epInfo.episodeTitle || `Episode ${epInfo.episodeNumber}`
-          const baseName = `${tv.showName} - ${epCode} - ${epTitle}`
+          const showFolder = showYear ? `${tv.showName} (${showYear})` : tv.showName
+          // Use showFolder (with year) in filename to match kodi-output.ts naming convention
+          const baseName = `${showFolder} - ${epCode} - ${epTitle}`
 
           log.info(`[media-lib] Encoding TV episode ${ei + 1}/${extractResult.outputFiles.length}: ${baseName}`)
 
-          const showFolder = showYear ? `${tv.showName} (${showYear})` : tv.showName
           const seasonDir = join(primaryLibraryPath, 'TV Shows', showFolder, `Season ${String(tv.season).padStart(2, '0')}`)
           mkdirSync(seasonDir, { recursive: true })
-          const epOutputPath = join(seasonDir, `${baseName}.mkv`)
+          // Encode to staging dir — exportTVEpisode will copy to final location
+          const epStagingPath = join(stagingDir, `${baseName}.mkv`)
 
           try {
             const epMediaInfo = await this.ffprobeService.analyze(stagingFile)
@@ -730,7 +732,7 @@ export class JobQueueService {
             const epEncodeResult = await this.ffmpegService.encode({
               jobId: `${jobId}_ep_${ei}`,
               inputPath: stagingFile,
-              outputPath: epOutputPath,
+              outputPath: epStagingPath,
               args: epEncodeArgs,
               totalDuration: epMediaInfo.duration,
               window,
@@ -741,30 +743,29 @@ export class JobQueueService {
             })
 
             if (epEncodeResult.success) {
-              allEpisodeFiles.push(epOutputPath)
-
-              // Generate episode NFO
-              this.kodiService.exportTVEpisode({
+              // exportTVEpisode copies from staging to season dir and generates NFO
+              const epExport = this.kodiService.exportTVEpisode({
                 libraryPath: primaryLibraryPath,
                 showName: showFolder,
                 season: tv.season,
                 episode: epInfo.episodeNumber,
                 episodeTitle: epTitle,
-                sourceFile: epOutputPath,
+                sourceFile: epStagingPath,
                 metadata: {
-                  plot: opts.customPlot || undefined,
                   tmdb_id: opts.tmdbId,
                   actors: tvActors
                 }
               })
 
+              allEpisodeFiles.push(epExport.episodePath)
+
               outputFileQueries.createOutputFile({
                 job_id: dbId,
-                file_path: epOutputPath,
+                file_path: epExport.episodePath,
                 format: 'mkv',
                 video_codec: preset === 'hevc' ? 'hevc' : 'h264'
               })
-              log.info(`[media-lib] TV episode encoded: ${epOutputPath}`)
+              log.info(`[media-lib] TV episode encoded: ${epExport.episodePath}`)
             } else {
               log.warn(`[media-lib] TV episode encode failed: ${epEncodeResult.error}`)
             }
