@@ -196,18 +196,20 @@ export class FFmpegRipperService {
   private findDiscMountPoint(discInfo: DiscInfo): string | null {
     // Try via disc-detection service first
     const dds = getDiscDetectionService()
-    const mountPoint = dds.findMountPoint(discInfo.title)
-    if (mountPoint) return mountPoint
+    if (discInfo.title) {
+      const mountPoint = dds.findMountPoint(discInfo.title)
+      if (mountPoint) return mountPoint
 
-    // Try additional variations
-    const candidates = [
-      `/Volumes/${discInfo.title}`,
-      `/Volumes/${discInfo.title.replace(/\s+/g, '_')}`,
-      `/Volumes/${discInfo.title.toUpperCase()}`,
-      `/Volumes/${discInfo.title.toUpperCase().replace(/\s+/g, '_')}`
-    ]
-    for (const path of candidates) {
-      if (existsSync(join(path, 'VIDEO_TS'))) return path
+      // Try additional variations
+      const candidates = [
+        `/Volumes/${discInfo.title}`,
+        `/Volumes/${discInfo.title.replace(/\s+/g, '_')}`,
+        `/Volumes/${discInfo.title.toUpperCase()}`,
+        `/Volumes/${discInfo.title.toUpperCase().replace(/\s+/g, '_')}`
+      ]
+      for (const path of candidates) {
+        if (existsSync(join(path, 'VIDEO_TS'))) return path
+      }
     }
 
     // Last resort: scan /Volumes for any mounted disc with VIDEO_TS
