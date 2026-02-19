@@ -231,21 +231,25 @@ export function RipPage() {
       return id === longestTrackId ? 'main' : 'featurette'
     }
 
-    // Build track metadata for non-episode/non-main tracks (extras)
-    const extrasTrackIds = isLibraryMode && !isIngest && selectedTracks.length > 1
-      ? selectedTracks.filter(id => {
-          const cat = getTrackCategory(id)
-          return cat !== 'main' && cat !== 'episode'
-        })
-      : []
-    const trackMeta = extrasTrackIds.length > 0
-      ? extrasTrackIds.map((id, idx) => {
+    // Build track metadata for ALL selected tracks (main + extras).
+    // Each entry carries the titleId so the pipeline can match output files correctly.
+    let extrasCounter = 0
+    const trackMeta = isLibraryMode && !isIngest && selectedTracks.length > 0
+      ? selectedTracks.map((id) => {
           const cat = getTrackCategory(id)
           const track = discInfo?.tracks.find(t => t.id === id)
-          const isGeneric = !track?.title || /^Title\s+\d+$/i.test(track.title)
-          const name = trackNames[id] || (isGeneric
-            ? `${kodiTitle || 'Bonus'} - Bonus ${String(idx + 1).padStart(3, '0')}`
-            : track?.title || `Bonus ${String(idx + 1).padStart(3, '0')}`)
+          let name: string
+          if (cat === 'main') {
+            name = kodiTitle || track?.title || 'Main Feature'
+          } else if (cat === 'episode') {
+            name = track?.title || `Episode`
+          } else {
+            extrasCounter++
+            const isGeneric = !track?.title || /^Title\s+\d+$/i.test(track.title)
+            name = trackNames[id] || (isGeneric
+              ? `${kodiTitle || 'Bonus'} - Bonus ${String(extrasCounter).padStart(3, '0')}`
+              : track?.title || `Bonus ${String(extrasCounter).padStart(3, '0')}`)
+          }
           return { titleId: id, category: cat, name }
         })
       : undefined
