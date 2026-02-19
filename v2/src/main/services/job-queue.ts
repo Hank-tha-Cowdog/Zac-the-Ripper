@@ -813,20 +813,68 @@ export class JobQueueService {
         return
       }
 
+      // ── Build titleId → output file mapping ──────────────────────
+      // MakeMKV rips titles sequentially. Output files correspond to
+      // successful extractions in titleIds order. Build a reliable mapping
+      // so we can match trackMeta entries (by titleId) to files.
+      const titleFileMap = new Map<number, string>()
+      {
+        // MakeMKV names files as D{disc}_t{titleId}.mkv — parse titleId from filename
+        const parseTitleId = (filePath: string): number | null => {
+          const match = filePath.match(/[Dd]\d+_t(\d+)\.mkv$/)
+          return match ? parseInt(match[1], 10) : null
+        }
+
+        for (const file of extractResult.outputFiles) {
+          const parsed = parseTitleId(file)
+          if (parsed !== null) {
+            titleFileMap.set(parsed, file)
+          }
+        }
+
+        // Fallback: if parsing failed (unusual naming), use sequential mapping
+        if (titleFileMap.size === 0 && extractResult.outputFiles.length > 0) {
+          log.warn(`[media-lib] Could not parse titleIds from filenames — using sequential mapping`)
+          for (let i = 0; i < extractResult.outputFiles.length && i < titleIds.length; i++) {
+            titleFileMap.set(titleIds[i], extractResult.outputFiles[i])
+          }
+        }
+        log.info(`[media-lib] Title→file map: ${[...titleFileMap.entries()].map(([id, f]) => `t${id}→${f.split('/').pop()}`).join(', ')}`)
+      }
+
       // ── Determine main feature vs extras from trackMeta ──────────
-      // Use the overridden list (where 'main' → 'featurette' when isExtrasDisc)
       const trackMetaList = trackMetaOverridden
-      let mainFileIndex = 0
+      let mainTitleId: number | null = null
+      let mainStagingPath: string | null = null
+
       if (trackMetaList && trackMetaList.length > 0) {
-        const mainMeta = trackMetaList.findIndex(m => m.category === 'main')
-        if (mainMeta >= 0) mainFileIndex = mainMeta
+        const mainMeta = trackMetaList.find(m => m.category === 'main')
+        if (mainMeta) {
+          mainTitleId = mainMeta.titleId
+          mainStagingPath = titleFileMap.get(mainMeta.titleId) || null
+        }
+      } else if (!skipMainEncode) {
+        // No trackMeta — single-track rip, use first output file
+        mainTitleId = titleIds[0]
+        mainStagingPath = extractResult.outputFiles[0] || null
+      }
+
+      if (!skipMainEncode && !mainStagingPath) {
+        // We expected a main track but don't have a file for it
+        if (extractResult.outputFiles.length > 0) {
+          // Fallback: use the first available output file
+          mainStagingPath = extractResult.outputFiles[0]
+          log.warn(`[media-lib] Main track file not found by titleId — falling back to first output file`)
+        } else {
+          throw new Error('No output files available for main feature encoding')
+        }
       }
 
       // ── Step 2: Encode main feature (if applicable) ──────────────
       phase = 'encode'
 
       if (!skipMainEncode) {
-        const stagingMkvPath = extractResult.outputFiles[mainFileIndex]
+        const stagingMkvPath = mainStagingPath!
         sendProgress(50, 'Step 2/3 — Analyzing extracted file...')
 
         let encodeResult: { success: boolean; error?: string }
@@ -901,14 +949,21 @@ export class JobQueueService {
       // go at the movie root level — NOT inside an Extras/ subfolder.
       // Plex, Jellyfin, and Kodi all expect: Movies/Title (Year)/Featurettes/file.mkv
       const extrasOutputFiles: string[] = []
-      if (trackMetaList && trackMetaList.length > 0 && extractResult.outputFiles.length > 0) {
+      if (trackMetaList && trackMetaList.length > 0 && titleFileMap.size > 0) {
+        // Build extras list by matching trackMeta entries to output files via titleId
         const extrasEntries = trackMetaList
-          .map((meta, i) => ({ meta, file: extractResult.outputFiles[i] }))
-          .filter((_, i) => i !== mainFileIndex || skipMainEncode)
+          .filter(meta => meta.category !== 'main' && meta.category !== 'episode')
+          .map(meta => ({ meta, file: titleFileMap.get(meta.titleId) }))
+          .filter((entry): entry is { meta: typeof trackMetaList[0]; file: string } => {
+            if (!entry.file) {
+              log.warn(`[media-lib] Extra "${entry.meta.name}" (title ${entry.meta.titleId}) — no output file found (extraction may have failed)`)
+              return false
+            }
+            return true
+          })
 
         for (let ei = 0; ei < extrasEntries.length; ei++) {
           const { meta: extraMeta, file: extrasFile } = extrasEntries[ei]
-          if (extraMeta.category === 'main') continue // Already encoded above
           const categoryFolder = EXTRAS_FOLDER_MAP[extraMeta.category] || 'Other'
           const extrasDir = join(movieRootDir, categoryFolder)
           mkdirSync(extrasDir, { recursive: true })
