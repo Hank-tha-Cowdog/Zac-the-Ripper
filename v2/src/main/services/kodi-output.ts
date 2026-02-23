@@ -4,6 +4,22 @@ import { createLogger } from '../util/logger'
 
 const log = createLogger('kodi-output')
 
+/**
+ * Sanitize a title for use in filesystem paths.
+ * Replaces characters that are illegal in file/folder names on macOS, Windows, and Linux.
+ * Forward slashes are replaced with a hyphen-space to preserve readability
+ * (e.g., "Fahrenheit 9/11" → "Fahrenheit 9-11").
+ */
+function sanitizeTitle(title: string): string {
+  return title
+    .replace(/\//g, '-')           // forward slash → hyphen
+    .replace(/\\/g, '-')           // backslash → hyphen
+    .replace(/:/g, ' -')           // colon → space-hyphen (common convention)
+    .replace(/[<>"|?*]/g, '')      // strip remaining illegal chars
+    .replace(/\s{2,}/g, ' ')       // collapse double spaces
+    .trim()
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────
 
 export interface KodiMovieParams {
@@ -137,7 +153,8 @@ export class KodiOutputService {
     edition?: string; soundVersion?: string; discNumber?: number; totalDiscs?: number; isExtrasDisc?: boolean
   }): { outputDir: string; videoPath: string } {
     const { libraryPath, title, year, edition, soundVersion, discNumber, totalDiscs, isExtrasDisc } = params
-    const folderName = `${title} (${year})`
+    const safeTitle = sanitizeTitle(title)
+    const folderName = `${safeTitle} (${year})`
     const outputDir = join(libraryPath, 'Movies', folderName)
 
     if (isExtrasDisc) {
@@ -161,7 +178,8 @@ export class KodiOutputService {
     const { libraryPath, title, year, artwork, edition, isExtrasDisc, videoAlreadyAtPath, discNumber } = params
     const soundVersion = (params as { soundVersion?: string }).soundVersion
     const totalDiscs = (params as { totalDiscs?: number }).totalDiscs
-    const folderName = `${title} (${year})`
+    const safeTitle = sanitizeTitle(title)
+    const folderName = `${safeTitle} (${year})`
     const outputDir = join(libraryPath, 'Movies', folderName)
 
     // For extras disc, no NFO needed
@@ -204,7 +222,8 @@ export class KodiOutputService {
 
     // Folder is always "Movies/Title (Year)/" — no edition in folder name
     // This groups all versions under one Kodi library entry
-    const folderName = `${title} (${year})`
+    const safeTitle = sanitizeTitle(title)
+    const folderName = `${safeTitle} (${year})`
     const outputDir = join(libraryPath, 'Movies', folderName)
     mkdirSync(outputDir, { recursive: true })
 
@@ -253,7 +272,8 @@ export class KodiOutputService {
   exportTVShow(params: KodiShowNFOParams): { showDir: string; nfoPath: string } {
     const { libraryPath, showName, year, artwork, seasonArtwork } = params
 
-    const showFolder = year ? `${showName} (${year})` : showName
+    const safeShowName = sanitizeTitle(showName)
+    const showFolder = year ? `${safeShowName} (${year})` : safeShowName
     const showDir = join(libraryPath, 'TV Shows', showFolder)
     mkdirSync(showDir, { recursive: true })
 
@@ -288,14 +308,16 @@ export class KodiOutputService {
   exportTVEpisode(params: KodiTVShowParams): { outputDir: string; nfoPath: string; episodePath: string } {
     const { libraryPath, showName, season, episode, episodeTitle, sourceFile, artwork, streamDetails } = params
 
-    const showDir = join(libraryPath, 'TV Shows', showName)
+    const safeShowName = sanitizeTitle(showName)
+    const safeEpTitle = episodeTitle ? sanitizeTitle(episodeTitle) : ''
+    const showDir = join(libraryPath, 'TV Shows', safeShowName)
     const seasonDir = join(showDir, `Season ${String(season).padStart(2, '0')}`)
     mkdirSync(seasonDir, { recursive: true })
 
     const epCode = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
-    const baseName = episodeTitle
-      ? `${showName} - ${epCode} - ${episodeTitle}`
-      : `${showName} - ${epCode}`
+    const baseName = safeEpTitle
+      ? `${safeShowName} - ${epCode} - ${safeEpTitle}`
+      : `${safeShowName} - ${epCode}`
 
     // Copy episode file
     const ext = extname(sourceFile) || '.mkv'

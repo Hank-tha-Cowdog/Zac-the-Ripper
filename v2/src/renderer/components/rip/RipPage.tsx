@@ -33,43 +33,22 @@ export function RipPage() {
     })
   }, [])
 
-  // Restore library context when disc changes (multi-disc workflow)
-  // Fires when a new disc is detected and library context is persisted.
-  // sessionDiscId is null after a disc reset — if library context exists,
-  // restore it so bonus disc 2 inherits the same title/year/collection.
+  // On disc change: clear "Add to Existing Movie" linked context (must be re-selected each disc)
+  // but restore the persisted collection name if one exists.
   useEffect(() => {
     if (!discInfo?.fingerprint) return
-    if (libraryTitle && !discSession.sessionDiscId) {
-      const tmdbId = parseInt(libraryTmdbId) || null
-      updateDiscSession({
-        kodiTitle: libraryTitle,
-        kodiYear: libraryYear,
-        kodiTmdbId: tmdbId,
-        kodiSetName: librarySetName,
-        kodiSetOverview: librarySetOverview,
-        sessionDiscId: discInfo.discId
-      })
-
-      // Also restore TMDB result for poster display + metadata
-      if (tmdbId) {
-        setTmdbResult({
-          id: tmdbId,
-          title: libraryTitle,
-          year: libraryYear,
-          poster_path: libraryPosterPath || null,
-          overview: librarySetOverview,
-          vote_average: 0,
-          belongs_to_collection: librarySetName
-            ? { id: 0, name: librarySetName }
-            : null
+    if (!discSession.sessionDiscId) {
+      // Clear any stale library link so user must re-select "Add to Existing Movie"
+      if (libraryTitle) {
+        clearLibraryContext()
+      }
+      // Restore persisted collection name (survives disc changes until manually cleared)
+      if (persistedCollectionName) {
+        updateDiscSession({
+          kodiSetName: persistedCollectionName,
+          sessionDiscId: discInfo.discId
         })
       }
-    } else if (!libraryTitle && persistedCollectionName && !discSession.sessionDiscId) {
-      // No full library context, but collection name was persisted independently
-      updateDiscSession({
-        kodiSetName: persistedCollectionName,
-        sessionDiscId: discInfo.discId
-      })
     }
   }, [discInfo?.fingerprint])
 
