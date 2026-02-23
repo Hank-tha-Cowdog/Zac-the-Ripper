@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Disc3 } from 'lucide-react'
 import { DiscInfoCard } from './DiscInfoCard'
 import { TrackSelector } from './TrackSelector'
 import { RipConfigPanel } from './RipConfigPanel'
 import { RipActionBar } from './RipActionBar'
 import { AudioConfigPanel } from './AudioConfigPanel'
+import { Button } from '../ui'
 import type { LibrarySelection } from './LibraryBrowser'
 import { useDiscStore } from '../../stores/disc-store'
 import { useJobsStore } from '../../stores/jobs-store'
@@ -15,7 +17,7 @@ export function RipPage() {
   const navigate = useNavigate()
   const {
     discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession,
-    discSession, trackCategories, trackNames
+    discSession, trackCategories, trackNames, tmdbResult
   } = useDiscStore()
   const { addJob } = useJobsStore()
   const [isRipping, setIsRipping] = useState(false)
@@ -30,6 +32,46 @@ export function RipPage() {
       setMusicOutputPath(val || '~/Music/Zac the Ripper')
     })
   }, [])
+
+  // Restore library context when disc changes (multi-disc workflow)
+  // Fires when a new disc is detected and library context is persisted.
+  // sessionDiscId is null after a disc reset — if library context exists,
+  // restore it so bonus disc 2 inherits the same title/year/collection.
+  useEffect(() => {
+    if (!discInfo?.fingerprint) return
+    if (libraryTitle && !discSession.sessionDiscId) {
+      const tmdbId = parseInt(libraryTmdbId) || null
+      updateDiscSession({
+        kodiTitle: libraryTitle,
+        kodiYear: libraryYear,
+        kodiTmdbId: tmdbId,
+        kodiSetName: librarySetName,
+        kodiSetOverview: librarySetOverview,
+        sessionDiscId: discInfo.discId
+      })
+
+      // Also restore TMDB result for poster display + metadata
+      if (tmdbId) {
+        setTmdbResult({
+          id: tmdbId,
+          title: libraryTitle,
+          year: libraryYear,
+          poster_path: libraryPosterPath || null,
+          overview: librarySetOverview,
+          vote_average: 0,
+          belongs_to_collection: librarySetName
+            ? { id: 0, name: librarySetName }
+            : null
+        })
+      }
+    } else if (!libraryTitle && persistedCollectionName && !discSession.sessionDiscId) {
+      // No full library context, but collection name was persisted independently
+      updateDiscSession({
+        kodiSetName: persistedCollectionName,
+        sessionDiscId: discInfo.discId
+      })
+    }
+  }, [discInfo?.fingerprint])
 
   const handleMusicOutputPathChange = (path: string) => {
     setMusicOutputPath(path)
@@ -59,7 +101,10 @@ export function RipPage() {
     totalDiscs, setTotalDiscs,
     tvSeason, setTvSeason,
     tvStartEpisode, setTvStartEpisode,
-    localIngestMode, setLocalIngestMode
+    localIngestMode, setLocalIngestMode,
+    libraryTitle, libraryYear, libraryTmdbId, librarySetName, librarySetOverview, libraryPosterPath,
+    saveLibraryContext, clearLibraryContext,
+    persistedCollectionName
   } = useRipSettings()
 
   const handleEject = async () => {
@@ -104,9 +149,20 @@ export function RipPage() {
         }
 
         // Auto-populate collection from TMDB if NFO didn't have it
+        const finalSetName = setName || details?.belongs_to_collection?.name || ''
         if (details?.belongs_to_collection?.name && !setName) {
           setKodiSetName(details.belongs_to_collection.name)
         }
+
+        // Persist library context to SQLite for multi-disc workflows
+        saveLibraryContext({
+          title: movie.title,
+          year: year,
+          tmdbId: String(movie.tmdbId || ''),
+          setName: finalSetName,
+          setOverview: setOverview || '',
+          posterPath: details?.poster_path || ''
+        })
 
         // Cache TMDB result for disc recognition
         if (discInfo?.discId) {
@@ -115,6 +171,16 @@ export function RipPage() {
       } catch (err) {
         console.warn('Failed to fetch TMDB details for library movie:', err)
       }
+    } else {
+      // No TMDB ID — still persist basic library context
+      saveLibraryContext({
+        title: movie.title,
+        year: movie.year ? String(movie.year) : '',
+        tmdbId: '',
+        setName: setName || '',
+        setOverview: setOverview || '',
+        posterPath: ''
+      })
     }
   }
 
@@ -269,6 +335,13 @@ export function RipPage() {
       }
     })() : undefined
 
+    // Build poster URL for progress display
+    const posterUrl = discSession.customPosterPath
+      ? `file://${discSession.customPosterPath}`
+      : tmdbResult?.poster_path
+        ? `https://image.tmdb.org/t/p/w185${tmdbResult.poster_path}`
+        : undefined
+
     try {
       const result = await window.ztr.rip.start({
         discIndex: isIngest ? 0 : selectedDrive,
@@ -280,6 +353,7 @@ export function RipPage() {
         trackMeta,
         isIngest,
         ingestFiles: isIngest ? discSession.ingestFiles : undefined,
+        posterUrl,
         kodiOptions: isLibraryMode ? {
           mediaType: kodiMediaType,
           title: kodiTitle,
@@ -317,7 +391,8 @@ export function RipPage() {
           edition: kodiEdition === 'Custom' ? kodiCustomEdition : kodiEdition || undefined,
           soundVersion: soundVersion === 'Custom' ? customSoundVersion : soundVersion || undefined,
           discNumber: parseInt(discNumber) || undefined,
-          totalDiscs: parseInt(totalDiscs) || undefined
+          totalDiscs: parseInt(totalDiscs) || undefined,
+          posterUrl
         })
         setTimeout(() => navigate('/progress'), 1500)
       }
@@ -328,9 +403,12 @@ export function RipPage() {
     }
   }
 
+  const enabledModesForButton = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
+  const canRip = selectedTracks.length > 0 && enabledModesForButton.length > 0 && !isRipping
+
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="text-2xl font-bold text-purple-400 font-display">Rip Disc</h1>
+      <h1 className="text-2xl font-bold text-purple-400 font-display animate-header-glow">Rip Disc</h1>
 
       <div className="grid grid-cols-5 gap-4">
         <div className="col-span-3 space-y-4">
@@ -345,6 +423,20 @@ export function RipPage() {
         </div>
 
         <div className="col-span-2 space-y-4">
+          {/* Top Rip Button */}
+          <Button
+            variant="primary"
+            size="lg"
+            className={`w-full text-lg font-display tracking-wide ${isRipping ? 'animate-rip-button' : canRip ? 'animate-rip-ready' : ''}`}
+            disabled={!canRip}
+            onClick={handleRip}
+            icon={<Disc3 className={`w-5 h-5${isRipping ? ' animate-spin' : ''}`} />}
+          >
+            <span className={isRipping ? 'animate-rip-text' : ''}>
+              {isRipping ? 'Ripping...' : 'RIP!'}
+            </span>
+          </Button>
+
           {isAudioCD ? (
             <AudioConfigPanel
               musicOutputPath={musicOutputPath}
@@ -365,6 +457,20 @@ export function RipPage() {
               year={kodiYear}
               onYearChange={setKodiYear}
               tmdbId={kodiTmdbId}
+              libraryTitle={libraryTitle}
+              libraryYear={libraryYear}
+              onClearLibraryContext={() => {
+                clearLibraryContext()
+                updateDiscSession({
+                  kodiTitle: '',
+                  kodiYear: '',
+                  kodiTmdbId: null,
+                  kodiSetName: '',
+                  kodiSetOverview: '',
+                  sessionDiscId: null
+                })
+                setTmdbResult(null)
+              }}
               onTmdbSelect={(r) => {
                 const year = (r.release_date || r.first_air_date || '').split('-')[0]
                 setKodiTmdbId(r.id)

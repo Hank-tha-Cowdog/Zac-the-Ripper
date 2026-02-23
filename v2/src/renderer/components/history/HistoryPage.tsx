@@ -7,7 +7,7 @@ export function HistoryPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="text-2xl font-bold text-purple-400 font-display">History</h1>
+      <h1 className="text-2xl font-bold text-purple-400 font-display animate-header-glow">History</h1>
 
       <HistoryTable onViewDetails={setSelectedJobId} />
 

@@ -144,5 +144,16 @@ export const DEFAULT_SETTINGS: Record<string, { value: string; category: string 
   'rip.tv_start_episode': { value: '1', category: 'rip' },
 
   // Local file ingest
-  'general.mode_local_ingest': { value: 'false', category: 'general' }
+  'general.mode_local_ingest': { value: 'false', category: 'general' },
+
+  // Library context persistence (survives disc changes for multi-disc workflows)
+  'rip.library_title': { value: '', category: 'rip' },
+  'rip.library_year': { value: '', category: 'rip' },
+  'rip.library_tmdb_id': { value: '', category: 'rip' },
+  'rip.library_set_name': { value: '', category: 'rip' },
+  'rip.library_set_overview': { value: '', category: 'rip' },
+  'rip.library_poster_path': { value: '', category: 'rip' },
+
+  // Collection name persistence (independent — survives disc changes until manually cleared)
+  'rip.collection_name': { value: '', category: 'rip' }
 }

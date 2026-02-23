@@ -4,7 +4,7 @@ import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import { tmpdir, homedir } from 'os'
 import { join, dirname } from 'path'
-import { mkdirSync, rmSync, copyFileSync, existsSync } from 'fs'
+import { mkdirSync, rmSync, copyFileSync, existsSync, readdirSync } from 'fs'
 import { MakeMKVService } from './makemkv'
 import { FFmpegService } from './ffmpeg'
 import { FFmpegRipperService } from './ffmpeg-ripper'
@@ -74,6 +74,7 @@ export class JobQueueService {
     discNumber?: number
     isIngest?: boolean
     ingestFiles?: string[]
+    posterUrl?: string
     window: BrowserWindow
     makemkvService: MakeMKVService
   }): Promise<{ jobId: string; dbId: number }> {
@@ -117,7 +118,8 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: dbJobType,
         output_path: primaryPath || outputDir,
-        movie_title: kodiOpts?.title || null
+        movie_title: kodiOpts?.title || null,
+        poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
@@ -159,7 +161,8 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: 'mkv_rip',
         output_path: outputDir,
-        movie_title: kodiOpts?.title || null
+        movie_title: kodiOpts?.title || null,
+        poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
@@ -189,7 +192,8 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: 'raw_capture',
         output_path: outputDir,
-        movie_title: kodiOpts?.title || null
+        movie_title: kodiOpts?.title || null,
+        poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
@@ -515,6 +519,13 @@ export class JobQueueService {
 
         mkdirSync(movieRootDir, { recursive: true })
         if (!skipMainEncode) mkdirSync(libraryOutputDir, { recursive: true })
+
+        // Deconflict extras disc output — a second extras disc for the same movie
+        // would collide with Featurettes/Extras.mkv from disc 1
+        if (useExtrasDiscMode) {
+          const extrasBaseName = opts?.edition || 'Extras'
+          finalVideoPath = this.deconflictExtrasPath(libraryOutputDir, extrasBaseName, new Set<string>())
+        }
         log.info(`[media-lib] Movie root dir: ${movieRootDir}`)
         log.info(`[media-lib] Output dir: ${libraryOutputDir}`)
         log.info(`[media-lib] Final video path: ${finalVideoPath} (skipMainEncode=${skipMainEncode})`)
@@ -962,15 +973,50 @@ export class JobQueueService {
             return true
           })
 
+        // ── Deconflict extras filenames with existing files ──────────
+        // When ripping a second disc for the same movie, the target extras
+        // directories may already contain files from the first disc.
+        // For auto-numbered "Bonus NNN" names, find the highest existing
+        // number and continue the sequence. For named extras, append a
+        // numeric suffix on collision.
+        const bonusPattern = /^(.+)\s*-\s*Bonus\s+(\d+)$/i
+        const usedPaths = new Set<string>()
+
+        // Find highest existing bonus number per category so disc 2 continues the sequence
+        const bonusOffsets = new Map<string, number>()
+        for (const entry of extrasEntries) {
+          const categoryFolder = EXTRAS_FOLDER_MAP[entry.meta.category] || 'Other'
+          if (!bonusOffsets.has(categoryFolder)) {
+            const extrasDir = join(movieRootDir, categoryFolder)
+            const highest = this.findHighestBonusNumber(extrasDir, movieTitle)
+            bonusOffsets.set(categoryFolder, highest)
+          }
+        }
+
+        // Track bonus counter per category for sequential numbering within this rip
+        const bonusCounters = new Map<string, number>()
+
         for (let ei = 0; ei < extrasEntries.length; ei++) {
           const { meta: extraMeta, file: extrasFile } = extrasEntries[ei]
           const categoryFolder = EXTRAS_FOLDER_MAP[extraMeta.category] || 'Other'
           const extrasDir = join(movieRootDir, categoryFolder)
           mkdirSync(extrasDir, { recursive: true })
 
-          // Sanitize filename
-          const safeName = extraMeta.name.replace(/[<>:"/\\|?*]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
-          const extrasOutputPath = join(extrasDir, `${safeName}.mkv`)
+          // Sanitize filename and renumber bonus tracks to continue sequence
+          let safeName = extraMeta.name.replace(/[<>:"/\\|?*]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
+          const bonusMatch = safeName.match(bonusPattern)
+          if (bonusMatch) {
+            // This is a "Title - Bonus NNN" auto-generated name — renumber
+            const prefix = bonusMatch[1].trim()
+            const offset = bonusOffsets.get(categoryFolder) || 0
+            const counter = (bonusCounters.get(categoryFolder) || 0) + 1
+            bonusCounters.set(categoryFolder, counter)
+            const newNum = offset + counter
+            safeName = `${prefix} - Bonus ${String(newNum).padStart(3, '0')}`
+          }
+
+          const extrasOutputPath = this.deconflictExtrasPath(extrasDir, safeName, usedPaths)
+          usedPaths.add(extrasOutputPath)
 
           log.info(`[media-lib] Encoding extra ${ei + 1}/${extrasEntries.length}: "${extraMeta.name}" (${extraMeta.category}) → ${extrasOutputPath}`)
           sendProgress(90 + (ei / extrasEntries.length) * 2, `Step 2/3 — Encoding extra: ${extraMeta.name}`)
@@ -1081,7 +1127,7 @@ export class JobQueueService {
 
             // Copy main feature if applicable
             if (!skipMainEncode) {
-              const { videoPath: additionalVideoPath } =
+              const { videoPath: additionalVideoPathRaw, outputDir: additionalOutputDir } =
                 this.kodiService.buildMoviePath({
                   libraryPath: additionalPath,
                   title: movieTitle,
@@ -1092,6 +1138,10 @@ export class JobQueueService {
                   totalDiscs: opts?.totalDiscs,
                   isExtrasDisc: useExtrasDiscMode
                 })
+              // Deconflict extras disc path in additional library too
+              const additionalVideoPath = useExtrasDiscMode
+                ? this.deconflictExtrasPath(additionalOutputDir, opts?.edition || 'Extras', new Set<string>())
+                : additionalVideoPathRaw
               mkdirSync(dirname(additionalVideoPath), { recursive: true })
               copyFileSync(finalVideoPath, additionalVideoPath)
               this.kodiService.finalizeMovie({
@@ -1598,5 +1648,57 @@ export class JobQueueService {
   private updateQueueItem(jobId: string, status: QueuedJob['status']): void {
     const item = this.queue.find(q => q.id === jobId)
     if (item) item.status = status
+  }
+
+  /**
+   * Find the highest "Bonus NNN" number in a directory.
+   * Scans for files matching the pattern `<prefix> - Bonus NNN.mkv`.
+   * Returns the highest NNN found, or 0 if none exist.
+   */
+  private findHighestBonusNumber(dir: string, prefix: string): number {
+    if (!existsSync(dir)) return 0
+    const safePrefix = prefix.replace(/[<>:"/\\|?*]/g, '_').trim()
+    const pattern = new RegExp(
+      `^${safePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*-\\s*Bonus\\s+(\\d+)\\.mkv$`,
+      'i'
+    )
+    let highest = 0
+    for (const file of readdirSync(dir)) {
+      const match = file.match(pattern)
+      if (match) {
+        const num = parseInt(match[1], 10)
+        if (num > highest) highest = num
+      }
+    }
+    return highest
+  }
+
+  /**
+   * Get a unique output path for an extras file, avoiding overwrites.
+   * - For "Bonus NNN" names: renumbers to continue from the highest existing
+   * - For named extras: appends " 2", " 3", etc. on collision
+   *
+   * @param alreadyUsed - set of paths claimed in the current rip session
+   *                      (to avoid collisions between extras within the same rip)
+   */
+  private deconflictExtrasPath(
+    dir: string,
+    baseName: string,
+    alreadyUsed: Set<string>
+  ): string {
+    const candidate = join(dir, `${baseName}.mkv`)
+    if (!existsSync(candidate) && !alreadyUsed.has(candidate)) {
+      return candidate
+    }
+
+    // Collision — find next available name
+    let i = 2
+    while (true) {
+      const variant = join(dir, `${baseName} ${i}.mkv`)
+      if (!existsSync(variant) && !alreadyUsed.has(variant)) {
+        return variant
+      }
+      i++
+    }
   }
 }

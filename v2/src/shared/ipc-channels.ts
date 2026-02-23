@@ -47,6 +47,7 @@ export const IPC = {
   DB_DISCS_GET: 'db:discs:get',
   DB_JOBS_LIST: 'db:jobs:list',
   DB_JOBS_GET: 'db:jobs:get',
+  DB_JOBS_RECENT: 'db:jobs:recent',
   DB_OUTPUT_FILES_LIST: 'db:output-files:list',
   DB_DISC_SETS_LIST: 'db:disc-sets:list',
   DB_DISC_SETS_CREATE: 'db:disc-sets:create',

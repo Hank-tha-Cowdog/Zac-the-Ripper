@@ -151,7 +151,7 @@ export function PreviewPage() {
   if (!discInfo) {
     return (
       <div className="space-y-6 animate-fade-in">
-        <h1 className="text-2xl font-bold text-purple-400 font-display">Disc Preview</h1>
+        <h1 className="text-2xl font-bold text-purple-400 font-display animate-header-glow">Disc Preview</h1>
         <div className="card p-8 text-center">
           <Disc3 className="w-12 h-12 text-zinc-600 mx-auto mb-3" />
           <p className="text-zinc-400">Insert a disc and scan it from the Dashboard or Rip page first.</p>
@@ -168,7 +168,7 @@ export function PreviewPage() {
   return (
     <div className="space-y-4 animate-fade-in">
       <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-bold text-purple-400 font-display">Disc Preview</h1>
+        <h1 className="text-2xl font-bold text-purple-400 font-display animate-header-glow">Disc Preview</h1>
         {playerAvailability && (
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${hasMpv ? 'bg-purple-500/20 text-purple-400' : hasFfplay ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
             {hasMpv ? 'mpv' : hasFfplay ? 'ffplay' : 'no player'}

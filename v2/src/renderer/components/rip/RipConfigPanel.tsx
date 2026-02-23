@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Search, Film, Tv, Package, FolderOpen, Layers, Upload, Plus, X } from 'lucide-react'
+import { Search, Film, Tv, Package, FolderOpen, Layers, Upload, Plus, X, Link2, Unlink } from 'lucide-react'
 import { Card, Input, Select, Button, Modal, TechLabel, Badge, Tooltip, LabelWithTooltip, Toggle } from '../ui'
 import { MOVIE_VERSIONS, SOUND_VERSIONS } from '../../../shared/constants'
 import { LibraryBrowser, LibrarySelection } from './LibraryBrowser'
@@ -34,6 +34,9 @@ interface RipConfigPanelProps {
   year: string
   onYearChange: (year: string) => void
   tmdbId: number | null
+  libraryTitle: string
+  libraryYear: string
+  onClearLibraryContext: () => void
   onTmdbSelect: (result: TMDBResult) => void
   edition: string
   onEditionChange: (edition: string) => void
@@ -104,7 +107,8 @@ export function RipConfigPanel({
   mediaType, onMediaTypeChange,
   title, onTitleChange,
   year, onYearChange,
-  tmdbId, onTmdbSelect,
+  tmdbId, libraryTitle, libraryYear, onClearLibraryContext,
+  onTmdbSelect,
   edition, onEditionChange,
   customEdition, onCustomEditionChange,
   isExtrasDisc, onExtrasDiscChange,
@@ -193,120 +197,31 @@ export function RipConfigPanel({
 
   return (
     <Card>
-      {/* ═══ RIP MODES SECTION ═══ */}
-      <div className="text-amber-400 font-display text-sm font-semibold tracking-wide uppercase mb-2">
-        Rip Modes
-      </div>
-      <div className="border-t border-amber-500/30 mb-3" />
-
-      <div className="space-y-3">
-        {modeConfigs.map((config) => (
-          <div key={config.key}>
-            <div className="flex items-center gap-1">
-              <Toggle
-                checked={modes[config.key] || false}
-                onChange={() => toggleMode(config.key)}
-                label={config.label}
-                description={config.description}
-              />
-              <Tooltip content={modeTooltips[config.key]} inline position="right" />
-            </div>
-
-            {/* Pipeline explanation for media library modes */}
-            {(config.key === 'jellyfin_export' || config.key === 'plex_export' || config.key === 'kodi_export') && modes[config.key] && (
-              <p className="ml-12 mt-1 text-[10px] text-zinc-500 font-mono">
-                Pipeline: Extract (MKV) &rarr; Encode &rarr; Organize (folders + NFO + artwork)
-              </p>
-            )}
-
-            {modes[config.key] && (
-              <div className="ml-12 mt-2 flex items-center gap-2">
-                <Input
-                  className="flex-1 text-xs"
-                  value={outputPaths[config.key] || settings[config.pathKey] || ''}
-                  onChange={(e) => onOutputPathChange(config.key, e.target.value)}
-                  placeholder="Output path..."
-                />
-                <Button variant="ghost" size="sm" onClick={() => selectOutputPath(config.key)}>
-                  <FolderOpen className="w-4 h-4" />
-                </Button>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* SRT conversion toggle (shown when no library mode) */}
-      {!mediaLibIsOn && (
-        <div className="mt-3 pt-3 border-t border-zinc-800">
-          <div className="flex items-center gap-1">
-            <Toggle
-              checked={convertSubsToSrt}
-              onChange={onConvertSubsToSrtChange}
-              label="Convert Subtitles to SRT"
-              description="OCR image subs to text SRT — needed for players that can't render PGS/VobSub"
-            />
-            <Tooltip
-              content="DVD subtitles (VobSub) and Blu-ray subtitles (PGS) are bitmap images. This option runs tesseract OCR to convert them to searchable text SRT files. Requires tesseract to be installed. Original image subs are always preserved alongside."
-              inline
-              position="right"
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Import Local Files toggle */}
-      <div className="mt-3 pt-3 border-t border-zinc-800">
-        <div className="flex items-center gap-1">
-          <Toggle
-            checked={localIngestMode}
-            onChange={onLocalIngestModeChange}
-            label="Import Local Files"
-            description="Process video files from disk instead of a disc drive"
-          />
-          <Tooltip
-            content="Enable to import existing MKV files or VIDEO_TS/AUDIO_TS folders from disk. Skips the disc extraction phase and goes directly to encoding and library export."
-            inline
-            position="right"
-          />
-        </div>
-
-        {localIngestMode && (
-          <div className="ml-12 mt-2 space-y-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<FolderOpen className="w-3 h-3" />}
-              onClick={onSelectIngestFiles}
-            >
-              Select Files or VIDEO_TS Folder
-            </Button>
-            {ingestFiles.length > 0 && (
-              <div className="space-y-1">
-                {ingestFiles.map((file, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs text-zinc-400">
-                    <span className="truncate flex-1 font-mono">{file.split('/').pop()}</span>
-                    <button
-                      onClick={() => onRemoveIngestFile(i)}
-                      className="text-zinc-600 hover:text-red-400 transition-colors"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* ═══ MEDIA OPTIONS SECTION ═══ */}
       {mediaLibIsOn && (
         <>
-          <div className="text-amber-400 font-display text-sm font-semibold tracking-wide uppercase mt-6 mb-2">
+          <div className="text-amber-400 font-display text-sm font-semibold tracking-wide uppercase mb-2">
             Media Options
           </div>
           <div className="border-t border-amber-500/30 mb-3" />
+
+          {/* Library context linked indicator */}
+          {libraryTitle && (
+            <div className="flex items-center justify-between bg-purple-500/10 border border-purple-500/30 rounded-lg px-3 py-2 mb-3">
+              <div className="flex items-center gap-2 text-sm text-purple-300">
+                <Link2 className="w-3.5 h-3.5" />
+                <span className="font-medium">Linked: {libraryTitle}{libraryYear ? ` (${libraryYear})` : ''}</span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-zinc-400 hover:text-red-400 px-1.5 py-0.5"
+                onClick={onClearLibraryContext}
+              >
+                <Unlink className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          )}
 
           <div className="space-y-3">
             {/* Media Type */}
@@ -655,6 +570,113 @@ export function RipConfigPanel({
           </div>
         </>
       )}
+
+      {/* ═══ RIP MODES SECTION ═══ */}
+      <div className={`text-amber-400 font-display text-sm font-semibold tracking-wide uppercase mb-2${mediaLibIsOn ? ' mt-6' : ''}`}>
+        Rip Modes
+      </div>
+      <div className="border-t border-amber-500/30 mb-3" />
+
+      <div className="space-y-3">
+        {modeConfigs.map((config) => (
+          <div key={config.key}>
+            <div className="flex items-center gap-1">
+              <Toggle
+                checked={modes[config.key] || false}
+                onChange={() => toggleMode(config.key)}
+                label={config.label}
+                description={config.description}
+              />
+              <Tooltip content={modeTooltips[config.key]} inline position="right" />
+            </div>
+
+            {/* Pipeline explanation for media library modes */}
+            {(config.key === 'jellyfin_export' || config.key === 'plex_export' || config.key === 'kodi_export') && modes[config.key] && (
+              <p className="ml-12 mt-1 text-[10px] text-zinc-500 font-mono">
+                Pipeline: Extract (MKV) &rarr; Encode &rarr; Organize (folders + NFO + artwork)
+              </p>
+            )}
+
+            {modes[config.key] && (
+              <div className="ml-12 mt-2 flex items-center gap-2">
+                <Input
+                  className="flex-1 text-xs"
+                  value={outputPaths[config.key] || settings[config.pathKey] || ''}
+                  onChange={(e) => onOutputPathChange(config.key, e.target.value)}
+                  placeholder="Output path..."
+                />
+                <Button variant="ghost" size="sm" onClick={() => selectOutputPath(config.key)}>
+                  <FolderOpen className="w-4 h-4" />
+                </Button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* SRT conversion toggle (shown when no library mode) */}
+      {!mediaLibIsOn && (
+        <div className="mt-3 pt-3 border-t border-zinc-800">
+          <div className="flex items-center gap-1">
+            <Toggle
+              checked={convertSubsToSrt}
+              onChange={onConvertSubsToSrtChange}
+              label="Convert Subtitles to SRT"
+              description="OCR image subs to text SRT — needed for players that can't render PGS/VobSub"
+            />
+            <Tooltip
+              content="DVD subtitles (VobSub) and Blu-ray subtitles (PGS) are bitmap images. This option runs tesseract OCR to convert them to searchable text SRT files. Requires tesseract to be installed. Original image subs are always preserved alongside."
+              inline
+              position="right"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Import Local Files toggle */}
+      <div className="mt-3 pt-3 border-t border-zinc-800">
+        <div className="flex items-center gap-1">
+          <Toggle
+            checked={localIngestMode}
+            onChange={onLocalIngestModeChange}
+            label="Import Local Files"
+            description="Process video files from disk instead of a disc drive"
+          />
+          <Tooltip
+            content="Enable to import existing MKV files or VIDEO_TS/AUDIO_TS folders from disk. Skips the disc extraction phase and goes directly to encoding and library export."
+            inline
+            position="right"
+          />
+        </div>
+
+        {localIngestMode && (
+          <div className="ml-12 mt-2 space-y-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<FolderOpen className="w-3 h-3" />}
+              onClick={onSelectIngestFiles}
+            >
+              Select Files or VIDEO_TS Folder
+            </Button>
+            {ingestFiles.length > 0 && (
+              <div className="space-y-1">
+                {ingestFiles.map((file, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs text-zinc-400">
+                    <span className="truncate flex-1 font-mono">{file.split('/').pop()}</span>
+                    <button
+                      onClick={() => onRemoveIngestFile(i)}
+                      className="text-zinc-600 hover:text-red-400 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ═══ MODALS ═══ */}
       <Modal isOpen={showSearch} onClose={() => setShowSearch(false)} title="Search TMDB" maxWidth="max-w-2xl">

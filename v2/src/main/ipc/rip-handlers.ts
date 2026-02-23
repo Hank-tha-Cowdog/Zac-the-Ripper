@@ -20,6 +20,7 @@ export function registerRipHandlers(): void {
     discNumber?: number
     isIngest?: boolean
     ingestFiles?: string[]
+    posterUrl?: string
   }) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { error: 'No window found' }
