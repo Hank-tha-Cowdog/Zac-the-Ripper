@@ -201,7 +201,6 @@ export function useRipSettings() {
     saveSetting('rip.library_set_name', '')
     saveSetting('rip.library_set_overview', '')
     saveSetting('rip.library_poster_path', '')
-    saveSetting('rip.collection_name', '')
   }, [saveSetting])
 
   // --- Persistent: local file ingest ---

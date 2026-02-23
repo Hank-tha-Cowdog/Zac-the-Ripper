@@ -1003,7 +1003,7 @@ export class JobQueueService {
           mkdirSync(extrasDir, { recursive: true })
 
           // Sanitize filename and renumber bonus tracks to continue sequence
-          let safeName = extraMeta.name.replace(/[<>:"/\\|?*]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
+          let safeName = extraMeta.name.replace(/[<>:"/\\|?*\/]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
           const bonusMatch = safeName.match(bonusPattern)
           if (bonusMatch) {
             // This is a "Title - Bonus NNN" auto-generated name — renumber
