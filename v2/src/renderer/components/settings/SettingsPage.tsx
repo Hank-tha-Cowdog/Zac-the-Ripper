@@ -15,7 +15,7 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="text-2xl font-bold text-purple-400 font-display">Settings</h1>
+      <h1 className="text-2xl font-bold text-purple-400 font-display animate-header-glow">Settings</h1>
 
       <div className="grid grid-cols-2 gap-6">
         <div className="space-y-6">

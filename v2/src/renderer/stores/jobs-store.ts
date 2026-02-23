@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-interface JobProgress {
+export interface JobProgress {
   jobId: string
   dbId: number
   type: string
@@ -18,6 +18,7 @@ interface JobProgress {
   soundVersion?: string
   discNumber?: number
   totalDiscs?: number
+  posterUrl?: string
 }
 
 interface LogEntry {
@@ -37,6 +38,7 @@ interface JobsState {
   completeJob: (jobId: string, outputFiles?: string[]) => void
   failJob: (jobId: string, error: string) => void
   cancelJob: (jobId: string) => void
+  loadRecentJobs: (jobs: JobProgress[]) => void
   addLog: (entry: LogEntry) => void
   clearLogs: () => void
 }
@@ -85,6 +87,13 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   cancelJob: (jobId) => set((state) => ({
     activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId)
   })),
+
+  loadRecentJobs: (jobs) => set((state) => {
+    // Merge DB history with in-memory recent jobs (in-memory takes precedence)
+    const inMemoryIds = new Set(state.recentJobs.map(j => j.dbId))
+    const dbOnly = jobs.filter(j => !inMemoryIds.has(j.dbId))
+    return { recentJobs: [...state.recentJobs, ...dbOnly].slice(0, 50) }
+  }),
 
   addLog: (entry) => set((state) => ({
     logs: [...state.logs, entry].slice(-1000)

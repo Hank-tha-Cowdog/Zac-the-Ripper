@@ -121,8 +121,12 @@ export function useRipSettings() {
     [updateDiscSession]
   )
   const setKodiSetName = useCallback(
-    (v: string) => updateDiscSession({ kodiSetName: v }),
-    [updateDiscSession]
+    (v: string) => {
+      updateDiscSession({ kodiSetName: v })
+      // Also persist collection name independently so it survives disc changes
+      saveSetting('rip.collection_name', v)
+    },
+    [updateDiscSession, saveSetting]
   )
   const setKodiSetOverview = useCallback(
     (v: string) => updateDiscSession({ kodiSetOverview: v }),
@@ -167,6 +171,39 @@ export function useRipSettings() {
     [saveSetting]
   )
 
+  // --- Persistent: collection name (independent, survives disc changes until manually cleared) ---
+  const persistedCollectionName = settings['rip.collection_name'] || ''
+
+  // --- Persistent: library context (survives disc changes for multi-disc workflows) ---
+  const libraryTitle = settings['rip.library_title'] || ''
+  const libraryYear = settings['rip.library_year'] || ''
+  const libraryTmdbId = settings['rip.library_tmdb_id'] || ''
+  const librarySetName = settings['rip.library_set_name'] || ''
+  const librarySetOverview = settings['rip.library_set_overview'] || ''
+  const libraryPosterPath = settings['rip.library_poster_path'] || ''
+
+  const saveLibraryContext = useCallback(
+    (ctx: { title: string; year: string; tmdbId: string; setName: string; setOverview: string; posterPath: string }) => {
+      saveSetting('rip.library_title', ctx.title)
+      saveSetting('rip.library_year', ctx.year)
+      saveSetting('rip.library_tmdb_id', ctx.tmdbId)
+      saveSetting('rip.library_set_name', ctx.setName)
+      saveSetting('rip.library_set_overview', ctx.setOverview)
+      saveSetting('rip.library_poster_path', ctx.posterPath)
+    },
+    [saveSetting]
+  )
+
+  const clearLibraryContext = useCallback(() => {
+    saveSetting('rip.library_title', '')
+    saveSetting('rip.library_year', '')
+    saveSetting('rip.library_tmdb_id', '')
+    saveSetting('rip.library_set_name', '')
+    saveSetting('rip.library_set_overview', '')
+    saveSetting('rip.library_poster_path', '')
+    saveSetting('rip.collection_name', '')
+  }, [saveSetting])
+
   // --- Persistent: local file ingest ---
   const localIngestMode = settings['general.mode_local_ingest'] === 'true'
   const setLocalIngestMode = useCallback(
@@ -202,6 +239,19 @@ export function useRipSettings() {
     // Local ingest
     localIngestMode,
     setLocalIngestMode,
+
+    // Collection name persistence
+    persistedCollectionName,
+
+    // Library context persistence
+    libraryTitle,
+    libraryYear,
+    libraryTmdbId,
+    librarySetName,
+    librarySetOverview,
+    libraryPosterPath,
+    saveLibraryContext,
+    clearLibraryContext,
 
     // Disc-session
     kodiTitle: discSession.kodiTitle,

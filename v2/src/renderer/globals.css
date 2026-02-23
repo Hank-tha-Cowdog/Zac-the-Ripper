@@ -286,6 +286,70 @@
   animation: spin-slow 2s linear infinite;
 }
 
+/* Logo glow */
+@keyframes logo-glow {
+  0%, 100% { filter: drop-shadow(0 0 4px rgb(168 85 247 / 0.3)); }
+  50% { filter: drop-shadow(0 0 10px rgb(168 85 247 / 0.6)) drop-shadow(0 0 20px rgb(168 85 247 / 0.15)); }
+}
+
+.animate-logo-glow {
+  animation: logo-glow 3s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* Nav active glow */
+.nav-active-glow {
+  box-shadow: inset 0 0 12px rgb(168 85 247 / 0.08), 0 0 8px rgb(168 85 247 / 0.06);
+}
+
+/* Card hover glow enhancement */
+.card-glow {
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.card-glow:hover {
+  box-shadow: 0 0 12px rgb(168 85 247 / 0.08), 0 0 24px rgb(168 85 247 / 0.04);
+}
+
+/* Active job card pulsing border */
+@keyframes job-active-pulse {
+  0%, 100% { border-color: rgb(168 85 247 / 0.3); box-shadow: 0 0 6px rgb(168 85 247 / 0.08); }
+  50% { border-color: rgb(168 85 247 / 0.5); box-shadow: 0 0 14px rgb(168 85 247 / 0.15); }
+}
+
+.animate-job-active {
+  animation: job-active-pulse 2.5s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* Rip ready button glow (subtle when ready, stronger when ripping) */
+@keyframes rip-ready-glow {
+  0%, 100% { box-shadow: 0 0 4px rgb(168 85 247 / 0.15), inset 0 0 4px rgb(168 85 247 / 0.03); }
+  50% { box-shadow: 0 0 10px rgb(168 85 247 / 0.3), 0 0 20px rgb(168 85 247 / 0.08), inset 0 0 6px rgb(168 85 247 / 0.05); }
+}
+
+.animate-rip-ready {
+  animation: rip-ready-glow 3s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* Header text glow */
+@keyframes header-glow {
+  0%, 100% { text-shadow: 0 0 6px rgb(168 85 247 / 0.2); }
+  50% { text-shadow: 0 0 12px rgb(168 85 247 / 0.4), 0 0 24px rgb(168 85 247 / 0.1); }
+}
+
+.animate-header-glow {
+  animation: header-glow 4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* Disc spinning for sidebar when disc loaded */
+@keyframes disc-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-disc-idle {
+  animation: disc-spin 8s linear infinite;
+}
+
 /* Electron frameless window drag region */
 .drag-region {
   -webkit-app-region: drag;

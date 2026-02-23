@@ -22,8 +22,8 @@ export function PipelineView({ activeStage }: PipelineViewProps) {
         return (
           <React.Fragment key={stage.key}>
             {i > 0 && <ArrowRight className="w-4 h-4 text-zinc-700 shrink-0" />}
-            <div className={`flex items-center gap-2 px-3 py-2 rounded ${
-              isActive ? 'bg-purple-600/20 border border-purple-500/30' :
+            <div className={`flex items-center gap-2 px-3 py-2 rounded transition-all duration-300 ${
+              isActive ? 'bg-purple-600/20 border border-purple-500/30 animate-border-glow' :
               isPast ? 'bg-emerald-500/10 border border-emerald-500/20' :
               'bg-zinc-900 border border-zinc-800'
             }`}>

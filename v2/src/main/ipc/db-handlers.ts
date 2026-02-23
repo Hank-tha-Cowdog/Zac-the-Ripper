@@ -24,6 +24,10 @@ export function registerDbHandlers(): void {
     return jobQueries.getJob(id)
   })
 
+  ipcMain.handle(IPC.DB_JOBS_RECENT, async (_event, limit?: number) => {
+    return jobQueries.getRecentJobs(limit || 20)
+  })
+
   // Output files
   ipcMain.handle(IPC.DB_OUTPUT_FILES_LIST, async (_event, jobId?: number) => {
     return outputFileQueries.listOutputFiles(jobId)

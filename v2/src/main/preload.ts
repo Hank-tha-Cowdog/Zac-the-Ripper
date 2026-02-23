@@ -93,7 +93,8 @@ const api = {
     },
     jobs: {
       list: (filters?: unknown) => ipcRenderer.invoke(IPC.DB_JOBS_LIST, filters),
-      get: (id: number) => ipcRenderer.invoke(IPC.DB_JOBS_GET, id)
+      get: (id: number) => ipcRenderer.invoke(IPC.DB_JOBS_GET, id),
+      recent: (limit?: number) => ipcRenderer.invoke(IPC.DB_JOBS_RECENT, limit)
     },
     outputFiles: {
       list: (jobId?: number) => ipcRenderer.invoke(IPC.DB_OUTPUT_FILES_LIST, jobId)

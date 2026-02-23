@@ -11,6 +11,7 @@ export interface JobRow {
   encoding_preset: string | null
   error_message: string | null
   movie_title: string | null
+  poster_url: string | null
   started_at: string | null
   completed_at: string | null
   duration_seconds: number | null
@@ -52,17 +53,19 @@ export function createJob(data: {
   output_path?: string
   encoding_preset?: string
   movie_title?: string
+  poster_url?: string
 }): JobRow {
   const result = getDb().prepare(`
-    INSERT INTO jobs (disc_id, job_type, status, input_path, output_path, encoding_preset, movie_title)
-    VALUES (?, ?, 'pending', ?, ?, ?, ?)
+    INSERT INTO jobs (disc_id, job_type, status, input_path, output_path, encoding_preset, movie_title, poster_url)
+    VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
   `).run(
     data.disc_id ?? null,
     data.job_type,
     data.input_path ?? null,
     data.output_path ?? null,
     data.encoding_preset ?? null,
-    data.movie_title ?? null
+    data.movie_title ?? null,
+    data.poster_url ?? null
   )
 
   return getJob(Number(result.lastInsertRowid))!
@@ -106,8 +109,8 @@ export function getActiveJobs(): JobRow[] {
   ).all() as JobRow[]
 }
 
-export function getRecentJobs(limit: number = 10): JobRow[] {
+export function getRecentJobs(limit: number = 20): JobRow[] {
   return getDb().prepare(
-    'SELECT * FROM jobs WHERE status = ? ORDER BY completed_at DESC LIMIT ?'
-  ).all('completed', limit) as JobRow[]
+    "SELECT * FROM jobs WHERE status IN ('completed', 'failed') ORDER BY completed_at DESC LIMIT ?"
+  ).all(limit) as JobRow[]
 }

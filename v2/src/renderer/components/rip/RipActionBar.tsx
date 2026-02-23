@@ -76,7 +76,7 @@ export function RipActionBar({ modes, onRip, onEject, isRipping, standbyMessage 
             disabled={!canRip}
             onClick={onRip}
             icon={<Disc3 className={`w-5 h-5${isRipping ? ' animate-spin' : ''}`} />}
-            className={`px-8${isRipping ? ' animate-rip-button' : ''}`}
+            className={`px-8${isRipping ? ' animate-rip-button' : canRip ? ' animate-rip-ready' : ''}`}
           >
             <span className={isRipping ? 'animate-rip-text' : ''}>
               {isRipping ? 'Ripping...' : 'RIP!'}

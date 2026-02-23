@@ -1,6 +1,7 @@
 import React from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Disc3, Play, Activity, Clock, Settings, RefreshCw, ArrowUpFromLine } from 'lucide-react'
+import { Logo } from '../ui'
 import { useDiscStore } from '../../stores/disc-store'
 import { useDiscDetection } from '../../hooks/useDiscDetection'
 
@@ -37,8 +38,13 @@ export function Sidebar() {
   return (
     <aside className="w-48 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
       <div className="p-4 border-b border-zinc-800 drag-region">
-        <h1 className="text-lg font-bold text-purple-400 font-display no-drag">Zac the Ripper</h1>
-        <span className="label-tech">v2.0</span>
+        <div className="flex items-center gap-2.5 no-drag">
+          <Logo size={28} glow />
+          <div>
+            <h1 className="text-lg font-bold text-purple-400 font-display leading-tight animate-header-glow">Zac the Ripper</h1>
+            <span className="label-tech">v2.0</span>
+          </div>
+        </div>
       </div>
 
       <nav className="flex-1 p-2 space-y-0.5">
@@ -47,9 +53,9 @@ export function Sidebar() {
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors duration-200 ${
+              `flex items-center gap-3 px-3 py-2 rounded text-sm transition-all duration-200 ${
                 isActive
-                  ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30'
+                  ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30 nav-active-glow'
                   : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border border-transparent'
               }`
             }
@@ -67,7 +73,7 @@ export function Sidebar() {
         {discInfo ? (
           <div className="mt-1.5 space-y-1.5">
             <div className="flex items-center gap-1.5">
-              <Disc3 className="w-3 h-3 text-purple-400 shrink-0" />
+              <Disc3 className="w-3 h-3 text-purple-400 shrink-0 animate-disc-idle" />
               <span className="text-xs text-zinc-300 truncate">{discInfo.title}</span>
             </div>
             <div className="flex items-center gap-1.5">

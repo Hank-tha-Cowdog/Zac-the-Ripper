@@ -412,6 +412,12 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('paths.music_output', '~/Music/Zac the Ripper', 'paths');
         INSERT OR IGNORE INTO settings (key, value, category) VALUES ('tools.cdparanoia_path', '', 'tools');
       `
+    },
+    {
+      name: '021_add_poster_url_to_jobs',
+      sql: `
+        ALTER TABLE jobs ADD COLUMN poster_url TEXT DEFAULT NULL;
+      `
     }
   ]
 }
