@@ -71,6 +71,8 @@ export class DiscDetectionService {
   private lastDrives: DriveInfo[] = []
   // In-flight guard: deduplicate concurrent scanDrives() calls
   private scanInFlight: Promise<DriveInfo[]> | null = null
+  // In-flight guard: deduplicate concurrent getDiscInfo() calls
+  private fullScanInFlight: Promise<DiscInfo | null> | null = null
   // Reference to the in-flight --noscan process so we can kill it if needed
   private scanProcess: ReturnType<typeof runProcess> | null = null
   // Ripping guard: when a MakeMKV rip/backup is active, skip disc polling
@@ -404,31 +406,45 @@ export class DiscDetectionService {
   }
 
   async getDiscInfo(discIndex: number): Promise<DiscInfo | null> {
+    // Deduplicate: if a full scan is already running, piggyback on it
+    // instead of spawning a second MakeMKV process (MakeMKV can't handle concurrent access)
+    if (this.fullScanInProgress && this.fullScanInFlight) {
+      log.info(`getDiscInfo(${discIndex}) — scan already in progress, awaiting existing result`)
+      return this.fullScanInFlight
+    }
+
     // Kill any in-flight --noscan polling process before starting a full scan,
     // because MakeMKV cannot handle concurrent drive access
     this.cancelInFlightScan()
     this.fullScanInProgress = true
     log.info(`getDiscInfo(${discIndex}) — acquiring scan lock`)
+
+    this.fullScanInFlight = this._getDiscInfoImpl(discIndex)
     try {
-      // Try audio CD detection first — cdparanoia -Q is fast (~1s) and
-      // must run before MakeMKV which can't handle audio CDs and may hang
-      const audioResult = await this.getAudioCDInfo(discIndex)
-      if (audioResult) return audioResult
-
-      if (this.hasMakeMKV()) {
-        const result = await this.getDiscInfoViaMakeMKV(discIndex)
-        if (result) return result
-
-        // MakeMKV failed (timeout, hung, etc.) — try lsdvd fallback for DVDs
-        log.warn(`getDiscInfo(${discIndex}) — MakeMKV scan failed, trying lsdvd fallback`)
-        const lsdvdResult = await this.getDiscInfoViaLsdvd(discIndex)
-        if (lsdvdResult) return lsdvdResult
-      }
-      return await this.getDiscInfoViaOS(discIndex)
+      return await this.fullScanInFlight
     } finally {
       this.fullScanInProgress = false
+      this.fullScanInFlight = null
       log.info(`getDiscInfo(${discIndex}) — scan lock released`)
     }
+  }
+
+  private async _getDiscInfoImpl(discIndex: number): Promise<DiscInfo | null> {
+    // Try audio CD detection first — cdparanoia -Q is fast (~1s) and
+    // must run before MakeMKV which can't handle audio CDs and may hang
+    const audioResult = await this.getAudioCDInfo(discIndex)
+    if (audioResult) return audioResult
+
+    if (this.hasMakeMKV()) {
+      const result = await this.getDiscInfoViaMakeMKV(discIndex)
+      if (result) return result
+
+      // MakeMKV failed (timeout, hung, etc.) — try lsdvd fallback for DVDs
+      log.warn(`getDiscInfo(${discIndex}) — MakeMKV scan failed, trying lsdvd fallback`)
+      const lsdvdResult = await this.getDiscInfoViaLsdvd(discIndex)
+      if (lsdvdResult) return lsdvdResult
+    }
+    return await this.getDiscInfoViaOS(discIndex)
   }
 
   /**
