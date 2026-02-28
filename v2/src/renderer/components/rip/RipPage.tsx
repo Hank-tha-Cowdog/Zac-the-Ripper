@@ -270,7 +270,9 @@ export function RipPage() {
       : -1
 
     // For TV shows, get the default category for each track
+    // When extras disc is on, ALL tracks are extras — no main feature
     const getTrackCategory = (id: number) => {
+      if (kodiIsExtrasDisc) return trackCategories[id] || 'featurette'
       if (trackCategories[id]) return trackCategories[id]
       if (kodiMediaType === 'tvshow') return 'episode'
       return id === longestTrackId ? 'main' : 'featurette'

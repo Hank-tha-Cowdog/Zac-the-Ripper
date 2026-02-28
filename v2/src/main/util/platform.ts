@@ -64,7 +64,9 @@ export function getDefaultToolPaths(): Record<string, string[]> {
         ],
         cdparanoia: [
           '/opt/homebrew/bin/cdparanoia',
-          '/usr/local/bin/cdparanoia'
+          '/opt/homebrew/bin/cd-paranoia',
+          '/usr/local/bin/cdparanoia',
+          '/usr/local/bin/cd-paranoia'
         ]
       }
     case 'linux':
@@ -75,7 +77,7 @@ export function getDefaultToolPaths(): Record<string, string[]> {
         mpv: ['/usr/bin/mpv', '/usr/local/bin/mpv'],
         ffplay: ['/usr/bin/ffplay', '/usr/local/bin/ffplay'],
         lsdvd: ['/usr/bin/lsdvd', '/usr/local/bin/lsdvd'],
-        cdparanoia: ['/usr/bin/cdparanoia', '/usr/local/bin/cdparanoia']
+        cdparanoia: ['/usr/bin/cdparanoia', '/usr/bin/cd-paranoia', '/usr/local/bin/cdparanoia', '/usr/local/bin/cd-paranoia']
       }
     case 'windows':
       return {
@@ -92,6 +94,15 @@ export function findToolPath(tool: string): string | null {
   // Check bundled binary first (highest priority)
   const bundled = getBundledBinPath(tool)
   if (bundled) return bundled
+
+  // Some tools have alternate names (e.g., cdparanoia → cd-paranoia from libcdio)
+  const altNames: Record<string, string[]> = {
+    cdparanoia: ['cd-paranoia']
+  }
+  for (const alt of altNames[tool] || []) {
+    const altBundled = getBundledBinPath(alt)
+    if (altBundled) return altBundled
+  }
 
   // Fall back to system paths
   const paths = getDefaultToolPaths()[tool] || []
