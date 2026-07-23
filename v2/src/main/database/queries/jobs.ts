@@ -1,4 +1,5 @@
 import { getDb } from '../connection'
+import { logEvent } from '../../util/event-log'
 
 export interface JobRow {
   id: number
@@ -19,8 +20,18 @@ export interface JobRow {
   updated_at: string
 }
 
-export function listJobs(filters?: { discId?: number; status?: string }): (JobRow & { disc_title?: string })[] {
-  let sql = 'SELECT jobs.*, discs.title AS disc_title FROM jobs LEFT JOIN discs ON jobs.disc_id = discs.id'
+export interface JobListFilters {
+  discId?: number
+  status?: string
+  /** Case-insensitive substring match against movie title, disc title, or output path. */
+  search?: string
+  limit?: number
+  offset?: number
+}
+
+const DEFAULT_JOB_LIST_LIMIT = 50
+
+export function buildJobListWhere(filters?: JobListFilters): { where: string; params: unknown[] } {
   const conditions: string[] = []
   const params: unknown[] = []
 
@@ -32,14 +43,39 @@ export function listJobs(filters?: { discId?: number; status?: string }): (JobRo
     conditions.push('jobs.status = ?')
     params.push(filters.status)
   }
-
-  if (conditions.length > 0) {
-    sql += ' WHERE ' + conditions.join(' AND ')
+  if (filters?.search) {
+    conditions.push('(jobs.movie_title LIKE ? OR discs.title LIKE ? OR jobs.output_path LIKE ?)')
+    const like = `%${filters.search}%`
+    params.push(like, like, like)
   }
 
-  sql += ' ORDER BY jobs.created_at DESC'
+  return { where: conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '', params }
+}
 
-  return getDb().prepare(sql).all(...params) as (JobRow & { disc_title?: string })[]
+/**
+ * Bounded by default (DEFAULT_JOB_LIST_LIMIT) — at "hundreds of discs"
+ * scale, each disc can spawn several job rows (rip + follow-on encodes +
+ * extras), and an unbounded SELECT * serialized whole across IPC on every
+ * History page load/filter change gets slower forever as history
+ * accumulates. Pass a higher `limit` explicitly for callers that
+ * genuinely need more (e.g. export).
+ */
+export function listJobs(filters?: JobListFilters): (JobRow & { disc_title?: string })[] {
+  const { where, params } = buildJobListWhere(filters)
+  const limit = filters?.limit ?? DEFAULT_JOB_LIST_LIMIT
+  const offset = filters?.offset ?? 0
+
+  const sql = `SELECT jobs.*, discs.title AS disc_title FROM jobs LEFT JOIN discs ON jobs.disc_id = discs.id${where} ORDER BY jobs.created_at DESC LIMIT ? OFFSET ?`
+
+  return getDb().prepare(sql).all(...params, limit, offset) as (JobRow & { disc_title?: string })[]
+}
+
+/** Total row count for the same filters listJobs() would apply — pairs with it for "Page X of Y" pagination UI. */
+export function countJobs(filters?: Pick<JobListFilters, 'discId' | 'status' | 'search'>): number {
+  const { where, params } = buildJobListWhere(filters)
+  const sql = `SELECT COUNT(*) as count FROM jobs LEFT JOIN discs ON jobs.disc_id = discs.id${where}`
+  const row = getDb().prepare(sql).get(...params) as { count: number }
+  return row.count
 }
 
 export function getJob(id: number): JobRow | undefined {
@@ -68,7 +104,9 @@ export function createJob(data: {
     data.poster_url ?? null
   )
 
-  return getJob(Number(result.lastInsertRowid))!
+  const job = getJob(Number(result.lastInsertRowid))!
+  logEvent('job_created', { dbId: job.id, jobType: job.job_type, discId: job.disc_id, movieTitle: job.movie_title })
+  return job
 }
 
 export function updateJobStatus(id: number, status: string, extra?: {
@@ -99,8 +137,30 @@ export function updateJobStatus(id: number, status: string, extra?: {
     values.push(extra.output_path)
   }
 
-  values.push(id)
-  getDb().prepare(`UPDATE jobs SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+  // Once a job is cancelled, no later status transition may overwrite that —
+  // otherwise a pipeline that keeps running after cancelJob() (cooperative
+  // cancellation isn't instantaneous) can flip the row back to 'completed' or
+  // 'failed' by the time it finally unwinds, hiding that it was cancelled.
+  values.push(id, status)
+  const result = getDb().prepare(
+    `UPDATE jobs SET ${fields.join(', ')} WHERE id = ? AND (status != 'cancelled' OR ? = 'cancelled')`
+  ).run(...values)
+
+  // Progress-only updates (status stays 'running' with a percentage attached)
+  // are frequent — logging every one would flood events.jsonl. Only log
+  // discrete lifecycle transitions: the first move into 'running', and every
+  // terminal state. Live progress belongs in status.json, not this stream.
+  if (result.changes > 0) {
+    if (status === 'running' && !extra?.progress) {
+      logEvent('phase_changed', { dbId: id, phase: 'running' })
+    } else if (status === 'completed') {
+      logEvent('job_completed', { dbId: id, outputPath: extra?.output_path })
+    } else if (status === 'failed') {
+      logEvent('job_failed', { dbId: id, error: extra?.error_message })
+    } else if (status === 'cancelled') {
+      logEvent('job_cancelled', { dbId: id })
+    }
+  }
 }
 
 export function getActiveJobs(): JobRow[] {
@@ -113,4 +173,22 @@ export function getRecentJobs(limit: number = 20): JobRow[] {
   return getDb().prepare(
     "SELECT * FROM jobs WHERE status IN ('completed', 'failed') ORDER BY completed_at DESC LIMIT ?"
   ).all(limit) as JobRow[]
+}
+
+/**
+ * Mark any job left 'pending'/'running' from a previous session as 'failed'.
+ * The in-memory job queue never survives a restart, so anything still in
+ * those states at startup was interrupted by a crash or force-quit — without
+ * this, such jobs stayed 'pending'/'running' in the DB and UI forever.
+ * Returns the number of rows reconciled, for startup logging.
+ */
+export function reconcileInterruptedJobs(): number {
+  const result = getDb().prepare(`
+    UPDATE jobs
+    SET status = 'failed',
+        error_message = 'Interrupted by app restart',
+        completed_at = datetime('now')
+    WHERE status IN ('pending', 'running')
+  `).run()
+  return result.changes
 }

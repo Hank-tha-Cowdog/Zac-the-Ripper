@@ -9,6 +9,8 @@ import { getDiscDetectionService } from './disc-detection'
 import type { DiscInfo, TrackInfo } from './disc-detection'
 import type { RipResult } from './makemkv'
 import { createLogger } from '../util/logger'
+import { getJobTranscriptPath } from '../util/job-transcript'
+import { hasRecognizedVideoStream } from '../util/ffprobe-csv'
 
 const execFileAsync = promisify(execFile)
 const log = createLogger('ffmpeg-ripper')
@@ -38,6 +40,7 @@ export class FFmpegRipperService {
   }): Promise<RipResult> {
     const { jobId, discInfo, titleIds, outputDir, window, onProgress } = params
     const outputFiles: string[] = []
+    const titleFiles: Array<{ titleId: number; filePath: string }> = []
 
     mkdirSync(outputDir, { recursive: true })
 
@@ -50,46 +53,83 @@ export class FFmpegRipperService {
     const videoTsDir = join(mountPoint, 'VIDEO_TS')
     log.info(`[ffmpeg-rip] Using VIDEO_TS at: ${videoTsDir}`)
 
-    // Resolve which tracks to rip
-    const selectedTracks = titleIds
-      .map(id => discInfo.tracks.find(t => t.id === id))
-      .filter((t): t is TrackInfo => t !== undefined)
+    let vtsToTracks: Map<number, TrackInfo[]>
 
-    if (selectedTracks.length === 0) {
-      return { success: false, outputFiles: [], error: 'No matching tracks found for the requested title IDs' }
-    }
-
-    // Map tracks to VTS numbers — try lsdvd vtsNumber first, then heuristic matching
-    const trackVtsMap = await this.resolveVTSNumbers(selectedTracks, videoTsDir)
-
-    // Deduplicate: if multiple tracks map to the same VTS, rip it only once
-    const vtsToTracks = new Map<number, TrackInfo[]>()
-    const unmappedTracks: TrackInfo[] = []
-
-    for (const track of selectedTracks) {
-      const vts = trackVtsMap.get(track.id)
-      if (vts !== undefined) {
-        const existing = vtsToTracks.get(vts) || []
-        existing.push(track)
-        vtsToTracks.set(vts, existing)
-      } else {
-        unmappedTracks.push(track)
+    if (discInfo.tracks.length === 0) {
+      // No disc metadata at all (e.g. MakeMKV couldn't read the disc, so there's
+      // nothing to map titleIds against). Discover VTS structure straight from
+      // the filesystem and rip every non-menu VTS as its own synthetic title.
+      log.info(`[ffmpeg-rip] No track metadata available — enumerating VTS structure directly from filesystem`)
+      const vtsEntries = this.enumerateVTSFromFiles(videoTsDir)
+      if (vtsEntries.length === 0) {
+        return { success: false, outputFiles: [], error: 'No VTS files found in VIDEO_TS — disc may be unreadable or non-standard' }
       }
-    }
+      // Probe real durations so per-VTS progress percentages work; falls back
+      // to 0 (progress-less but still functional) if ffprobe can't read a VTS.
+      const vtsDurations = await this.probeVTSDurations(videoTsDir)
 
-    if (unmappedTracks.length > 0) {
-      log.warn(`[ffmpeg-rip] Could not determine VTS for ${unmappedTracks.length} track(s): ${unmappedTracks.map(t => `title ${t.id}`).join(', ')}`)
-    }
+      vtsToTracks = new Map()
+      vtsEntries.forEach((entry, i) => {
+        const syntheticId = titleIds[i] ?? entry.vts
+        vtsToTracks.set(entry.vts, [{
+          id: syntheticId,
+          title: `Title ${syntheticId}`,
+          duration: '',
+          durationSeconds: vtsDurations.get(entry.vts) ?? 0,
+          size: `${entry.sizeMB.toFixed(0)} MB`,
+          sizeBytes: Math.round(entry.sizeMB * 1024 * 1024),
+          chapters: 0,
+          resolution: '',
+          framerate: '',
+          isInterlaced: false,
+          audioTracks: [],
+          subtitleTracks: [],
+          vtsNumber: entry.vts
+        }])
+      })
+      log.info(`[ffmpeg-rip] Discovered ${vtsToTracks.size} VTS(es) via file enumeration: ${vtsEntries.map(e => `VTS ${e.vts} (${e.sizeMB.toFixed(0)}MB)`).join(', ')}`)
+    } else {
+      // Resolve which tracks to rip
+      const selectedTracks = titleIds
+        .map(id => discInfo.tracks.find(t => t.id === id))
+        .filter((t): t is TrackInfo => t !== undefined)
 
-    if (vtsToTracks.size === 0) {
-      return { success: false, outputFiles: [], error: 'Could not determine VTS numbers for any selected tracks. VOB fallback requires VTS mapping.' }
-    }
+      if (selectedTracks.length === 0) {
+        return { success: false, outputFiles: [], error: 'No matching tracks found for the requested title IDs' }
+      }
 
-    // Log deduplication
-    for (const [vts, tracks] of vtsToTracks) {
-      if (tracks.length > 1) {
-        log.warn(`[ffmpeg-rip] VTS ${vts} maps to ${tracks.length} selected titles (${tracks.map(t => t.id).join(', ')}). ` +
-          `Will rip VTS once — concat approach cannot distinguish program chains within a VTS.`)
+      // Map tracks to VTS numbers — try lsdvd vtsNumber first, then heuristic matching
+      const trackVtsMap = await this.resolveVTSNumbers(selectedTracks, videoTsDir)
+
+      // Deduplicate: if multiple tracks map to the same VTS, rip it only once
+      vtsToTracks = new Map<number, TrackInfo[]>()
+      const unmappedTracks: TrackInfo[] = []
+
+      for (const track of selectedTracks) {
+        const vts = trackVtsMap.get(track.id)
+        if (vts !== undefined) {
+          const existing = vtsToTracks.get(vts) || []
+          existing.push(track)
+          vtsToTracks.set(vts, existing)
+        } else {
+          unmappedTracks.push(track)
+        }
+      }
+
+      if (unmappedTracks.length > 0) {
+        log.warn(`[ffmpeg-rip] Could not determine VTS for ${unmappedTracks.length} track(s): ${unmappedTracks.map(t => `title ${t.id}`).join(', ')}`)
+      }
+
+      if (vtsToTracks.size === 0) {
+        return { success: false, outputFiles: [], error: 'Could not determine VTS numbers for any selected tracks. VOB fallback requires VTS mapping.' }
+      }
+
+      // Log deduplication
+      for (const [vts, tracks] of vtsToTracks) {
+        if (tracks.length > 1) {
+          log.warn(`[ffmpeg-rip] VTS ${vts} maps to ${tracks.length} selected titles (${tracks.map(t => t.id).join(', ')}). ` +
+            `Will rip VTS once — concat approach cannot distinguish program chains within a VTS.`)
+        }
       }
     }
 
@@ -149,6 +189,13 @@ export class FFmpegRipperService {
 
       if (result.success && result.outputFiles.length > 0) {
         outputFiles.push(...result.outputFiles)
+        // A VTS ripped once can satisfy multiple requested titleIds (when
+        // several selected titles were deduplicated onto the same VTS) —
+        // associate the one output file with all of them, not just the
+        // primary track used for naming/duration.
+        for (const t of tracks) {
+          titleFiles.push({ titleId: t.id, filePath: result.outputFiles[0] })
+        }
 
         // Post-rip validation
         const valid = await this.validateOutput(result.outputFiles[0], primaryTrack.durationSeconds)
@@ -173,7 +220,7 @@ export class FFmpegRipperService {
       log.warn(`[ffmpeg-rip] ${skippedVts.length} VTS(es) skipped: ${skippedVts.join('; ')}`)
     }
     log.info(`[ffmpeg-rip] Complete — ${outputFiles.length} file(s) ripped via ffmpeg VOB fallback`)
-    return { success: true, outputFiles }
+    return { success: true, outputFiles, titleFiles }
   }
 
   // ─── VOB file discovery ─────────────────────────────────────────────
@@ -222,7 +269,9 @@ export class FFmpegRipperService {
           return volPath
         }
       }
-    } catch {}
+    } catch {
+      // /Volumes unreadable — fall through to "no mount point found"
+    }
 
     return null
   }
@@ -511,6 +560,7 @@ export class FFmpegRipperService {
       const proc = runProcess({
         command: ffmpeg,
         args,
+        transcriptPath: getJobTranscriptPath(jobId, 'ffmpeg-vob'),
         onStdout: (line) => {
           // Parse progress from -progress pipe:1 output
           if (line.startsWith('out_time_us=') || line.startsWith('out_time_ms=')) {
@@ -564,17 +614,26 @@ export class FFmpegRipperService {
 
   // ─── VOB pre-check ──────────────────────────────────────────────────
 
+  /**
+   * Checks not just that a video-*typed* stream exists but that its codec is
+   * actually recognized. Verified against a real disc: some DVD bonus-content
+   * VTSes (menu-heavy/interactive material, in this case) have a stream
+   * ffprobe types as "video" but reports codec_name=unknown for — the
+   * codec_type-only check let these through, wasting a full concat+copy
+   * attempt that then failed with "Could not find codec parameters" instead
+   * of being skipped cleanly up front like a genuinely video-less VOB is.
+   */
   private async probeVOBHasVideo(vobPath: string): Promise<boolean> {
     const ffprobe = this.getFFprobePath()
     try {
       const { stdout } = await execFileAsync(ffprobe, [
         '-hide_banner', '-v', 'error',
         '-select_streams', 'v',
-        '-show_entries', 'stream=codec_type',
+        '-show_entries', 'stream=codec_type,codec_name',
         '-of', 'csv=p=0',
         vobPath
       ], { timeout: 10000 })
-      return stdout.trim().includes('video')
+      return hasRecognizedVideoStream(stdout)
     } catch {
       // ffprobe failed — VOB might still be valid, let ffmpeg try
       return true
@@ -634,10 +693,12 @@ export class FFmpegRipperService {
       return true
     }
 
-    // Try prefix match (sub-jobs use jobId_vtsN format)
+    // Try prefix match (sub-jobs use jobId_vtsN format). The separator check
+    // matters: without it, jobId "abc" would also match an unrelated job
+    // "abc2_vts1".
     let cancelled = false
     for (const [key, p] of this.activeProcesses) {
-      if (key.startsWith(jobId)) {
+      if (key.startsWith(jobId + '_')) {
         log.info(`[ffmpeg-rip] Cancelling sub-job ${key}`)
         p.kill()
         this.activeProcesses.delete(key)
@@ -645,5 +706,13 @@ export class FFmpegRipperService {
       }
     }
     return cancelled
+  }
+
+  /** Kill every active ffmpeg VOB-rip process immediately — used on app quit. */
+  killAll(): void {
+    for (const [key, proc] of this.activeProcesses) {
+      proc.kill()
+      this.activeProcesses.delete(key)
+    }
   }
 }

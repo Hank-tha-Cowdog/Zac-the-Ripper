@@ -2,15 +2,16 @@ import { BrowserWindow } from 'electron'
 import { readdirSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { exec, spawn, type ChildProcess } from 'child_process'
+import { exec } from 'child_process'
 import { promisify } from 'util'
-import http from 'http'
 
 const execAsync = promisify(exec)
 import { runProcess, RunningProcess } from '../util/process-runner'
 import { getSetting } from '../database/queries/settings'
 import { findToolPath, getBundledBinPath } from '../util/platform'
 import { createLogger } from '../util/logger'
+import { safeSend } from '../util/safe-send'
+import { getJobTranscriptPath } from '../util/job-transcript'
 import { IPC } from '../../shared/ipc-channels'
 
 const log = createLogger('makemkv')
@@ -35,6 +36,19 @@ export interface RipResult {
   outputFiles: string[]
   error?: string
   readErrors?: ReadError[]
+  cancelled?: boolean
+  /**
+   * Explicit titleId → output file path, alongside the flat outputFiles
+   * list. Consumers that need to associate a specific ripped file with the
+   * title it came from (TV episode numbering, extras naming) previously had
+   * to either pair outputFiles with the *requested* titleIds by array
+   * position — which silently mislabels everything after a skipped/failed
+   * title — or reconstruct the mapping by regex-parsing MakeMKV's own
+   * output filenames, which doesn't match every naming convention (notably
+   * the ffmpeg VOB fallback's). This is populated directly from what was
+   * actually ripped, so it's correct even when some requested titles failed.
+   */
+  titleFiles?: Array<{ titleId: number; filePath: string }>
 }
 
 /** Expand leading ~ to the user's home directory */
@@ -47,6 +61,12 @@ function expandPath(p: string): string {
 
 export class MakeMKVService {
   private activeProcesses = new Map<string, RunningProcess>()
+  // ripTitles() rips multiple titles sequentially, reusing the same jobId key
+  // in activeProcesses for each one — killing the in-flight process for a
+  // cancelled job isn't enough on its own, since the loop would just move on
+  // to the next title. This flag lets the loop check "was this job cancelled"
+  // between titles and stop instead.
+  private cancelledJobIds = new Set<string>()
 
   private getMakeMKVPath(): string {
     const bundled = getBundledBinPath('makemkvcon')
@@ -71,6 +91,7 @@ export class MakeMKVService {
     const outputDir = expandPath(params.outputDir)
     const makemkvcon = this.getMakeMKVPath()
     const outputFiles: string[] = []
+    const titleFiles: Array<{ titleId: number; filePath: string }> = []
     const allReadErrors: ReadError[] = []
     const totalTitles = titleIds.length
 
@@ -78,8 +99,15 @@ export class MakeMKVService {
     mkdirSync(outputDir, { recursive: true })
 
     const failedTitles: Array<{ titleId: number; error: string }> = []
+    let cancelled = false
 
     for (let idx = 0; idx < titleIds.length; idx++) {
+      if (this.cancelledJobIds.has(jobId)) {
+        log.info(`[rip] Job ${jobId} cancelled — stopping before title ${titleIds[idx]} (${idx}/${totalTitles} done)`)
+        cancelled = true
+        break
+      }
+
       const titleId = titleIds[idx]
       const result = await this.ripSingleTitle({
         jobId,
@@ -100,6 +128,14 @@ export class MakeMKVService {
       }
 
       if (!result.success) {
+        if (this.cancelledJobIds.has(jobId)) {
+          // This title failed because cancelJob() killed it mid-rip, not because
+          // of a real disc/tool error — stop here instead of treating it as a
+          // per-title failure and moving on to the next one.
+          log.info(`[rip] Job ${jobId} cancelled mid-title ${titleId} — stopping`)
+          cancelled = true
+          break
+        }
         // Don't abort — continue with remaining titles so partial results are preserved.
         // TV DVDs often include a "play all" title that MakeMKV can't handle, but
         // individual episode titles extract fine.
@@ -110,6 +146,12 @@ export class MakeMKVService {
 
       if (result.outputFiles.length > 0) {
         outputFiles.push(...result.outputFiles)
+        // ripSingleTitle produces exactly one file per title in practice;
+        // associate all (just in case) with this loop's titleId, which is
+        // known-correct regardless of what MakeMKV named the file.
+        for (const filePath of result.outputFiles) {
+          titleFiles.push({ titleId, filePath })
+        }
       }
     }
 
@@ -123,12 +165,14 @@ export class MakeMKVService {
       log.warn(`[rip] ${failedTitles.length} of ${totalTitles} title(s) failed: ${failedTitles.map(f => `title ${f.titleId}`).join(', ')}`)
     }
 
+    this.cancelledJobIds.delete(jobId)
+
     // Report success if ANY titles were extracted — partial results are usable
     const overallSuccess = outputFiles.length > 0
     const error = failedTitles.length > 0
       ? `${failedTitles.length} of ${totalTitles} title(s) failed: ${failedTitles.map(f => f.error).join('; ')}`
       : undefined
-    return { success: overallSuccess, outputFiles, readErrors: allReadErrors, error }
+    return { success: overallSuccess, outputFiles, titleFiles, readErrors: allReadErrors, error, cancelled }
   }
 
   private ripSingleTitle(params: {
@@ -186,13 +230,21 @@ export class MakeMKVService {
           String(titleId),
           outputDir
         ],
+        transcriptPath: getJobTranscriptPath(jobId, 'makemkv'),
         onStdout: (line) => {
-          // Parse PRGV: current, total, max (progress values)
+          // Parse PRGV: current, total, max — current is scoped to whatever
+          // sub-operation MakeMKV is in right now (analyze, save, ...) and
+          // resets to 0 at each transition; total is scoped to the whole
+          // task and increases monotonically. Using current/max here made
+          // the reported percentage visibly jump backwards at every
+          // operation boundary; total/max doesn't.
           if (line.startsWith('PRGV:')) {
             const parts = line.substring(5).split(',')
             const current = parseInt(parts[0])
+            const total = parseInt(parts[1])
             const max = parseInt(parts[2])
-            const titlePct = max > 0 ? (current / max) * 100 : 0
+            if (!Number.isFinite(current) || !Number.isFinite(total) || !Number.isFinite(max)) return
+            const titlePct = max > 0 ? (total / max) * 100 : 0
             // Overall progress across all titles
             const overallPct = ((titleIndex + titlePct / 100) / totalTitles) * 100
 
@@ -205,7 +257,7 @@ export class MakeMKVService {
             if (onProgress) {
               onProgress(overallPct, `${titleLabel} — ${titlePct.toFixed(0)}%${errorSuffix}`)
             } else {
-              window.webContents.send(IPC.RIP_PROGRESS, {
+              safeSend(window, IPC.RIP_PROGRESS, {
                 jobId,
                 current,
                 total: max,
@@ -398,6 +450,7 @@ export class MakeMKVService {
     return new Promise((resolve) => {
       const proc = runProcess({
         command: makemkvcon,
+        transcriptPath: getJobTranscriptPath(jobId, 'makemkv-backup'),
         args: [
           '--robot',
           '--progress=-same',
@@ -410,10 +463,14 @@ export class MakeMKVService {
           if (line.startsWith('PRGV:')) {
             const parts = line.substring(5).split(',')
             const current = parseInt(parts[0])
+            const total = parseInt(parts[1])
             const max = parseInt(parts[2])
-            const percentage = max > 0 ? (current / max) * 100 : 0
+            if (!Number.isFinite(current) || !Number.isFinite(total) || !Number.isFinite(max)) return
+            // See the ripSingleTitle PRGV comment above: total/max tracks
+            // the whole task, current/max resets at every sub-operation.
+            const percentage = max > 0 ? (total / max) * 100 : 0
 
-            window.webContents.send(IPC.RIP_PROGRESS, {
+            safeSend(window, IPC.RIP_PROGRESS, {
               jobId,
               current,
               total: max,
@@ -425,8 +482,12 @@ export class MakeMKVService {
         },
         onExit: (code) => {
           this.activeProcesses.delete(jobId)
+          const wasCancelled = this.cancelledJobIds.has(jobId)
+          this.cancelledJobIds.delete(jobId)
           if (code === 0) {
             resolve({ success: true })
+          } else if (wasCancelled) {
+            resolve({ success: false, error: 'Cancelled' })
           } else {
             resolve({ success: false, error: `MakeMKV backup exited with code ${code}` })
           }
@@ -437,158 +498,26 @@ export class MakeMKVService {
     })
   }
 
-  // ─── Streaming ──────────────────────────────────────────────────────
-
-  private streamProcess: ChildProcess | null = null
-  private _streamSupported: boolean | null = null
-
-  /** Check if makemkvcon supports the 'stream' subcommand by parsing help output */
-  async checkStreamSupport(): Promise<boolean> {
-    if (this._streamSupported !== null) return this._streamSupported
-
-    const makemkvcon = this.getMakeMKVPath()
-    return new Promise((resolve) => {
-      // Run 'makemkvcon' with no args — it prints usage/help listing available commands
-      // Check if "stream" appears as a recognized command in the output
-      const proc = spawn(makemkvcon, [], {
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-
-      let stdout = ''
-      let stderr = ''
-      proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString() })
-      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString() })
-
-      const timeout = setTimeout(() => {
-        // If makemkvcon hangs for 15s on a bare invocation, assume no stream support (safe default)
-        proc.kill()
-        log.info('[stream] makemkvcon timed out on help check — assuming stream not supported')
-        this._streamSupported = false
-        resolve(false)
-      }, 15000)
-
-      proc.on('exit', () => {
-        clearTimeout(timeout)
-        const output = (stdout + '\n' + stderr).toLowerCase()
-        // Look for "stream" as a listed command in the help/usage output
-        const supported = output.includes('stream')
-        log.info(`[stream] makemkvcon stream support: ${supported}`)
-        this._streamSupported = supported
-        resolve(supported)
-      })
-    })
-  }
-
-  async startStream(discIndex: number): Promise<{ port: number }> {
-    // Check if stream is supported first
-    const supported = await this.checkStreamSupport()
-    if (!supported) {
-      throw new Error(
-        'The "stream" command is not available in your version of makemkvcon. ' +
-        'Disc preview requires MakeMKV v1.17.8+ with streaming support. ' +
-        'You can use VLC to preview disc content instead.'
-      )
-    }
-
-    // Stop any existing stream first, then wait for it to fully release the drive
-    if (this.streamProcess) {
-      this.stopStream()
-      await new Promise(r => setTimeout(r, 2000))
-    }
-
-    const makemkvcon = this.getMakeMKVPath()
-    const port = 51000
-
-    log.info(`[stream] Starting MakeMKV stream server: disc:${discIndex} on port ${port}`)
-    const proc = spawn(makemkvcon, ['stream', `disc:${discIndex}`], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-    this.streamProcess = proc
-
-    // Track whether process exited early (before server became ready)
-    let earlyExit = false
-    let earlyExitCode: number | null = null
-    let stderrOutput = ''
-
-    proc.stdout?.on('data', (data: Buffer) => {
-      log.debug(`[stream] stdout: ${data.toString().trim()}`)
-    })
-    proc.stderr?.on('data', (data: Buffer) => {
-      const msg = data.toString().trim()
-      stderrOutput += msg + '\n'
-      log.info(`[stream] stderr: ${msg}`)
-    })
-    proc.on('exit', (code) => {
-      log.info(`[stream] MakeMKV stream server exited with code ${code}`)
-      earlyExit = true
-      earlyExitCode = code
-      if (this.streamProcess === proc) {
-        this.streamProcess = null
-      }
-    })
-
-    // Wait for stream server to be ready (up to 90s for slow DVD spinup)
-    await this.waitForStreamReady(port, 90000, () => earlyExit, () => earlyExitCode, () => stderrOutput)
-    return { port }
-  }
-
-  stopStream(): void {
-    if (this.streamProcess) {
-      log.info('[stream] Stopping MakeMKV stream server')
-      this.streamProcess.kill()
-      this.streamProcess = null
-    }
-  }
-
-  private waitForStreamReady(
-    port: number,
-    maxWaitMs: number,
-    hasExited: () => boolean,
-    exitCode: () => number | null,
-    stderrOutput: () => string
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const start = Date.now()
-      const poll = () => {
-        // If the process already died, stop waiting
-        if (hasExited()) {
-          const code = exitCode()
-          const stderr = stderrOutput().trim()
-          const detail = stderr ? `: ${stderr.slice(0, 200)}` : ''
-          reject(new Error(`MakeMKV stream process exited with code ${code} before server became ready${detail}`))
-          return
-        }
-
-        if (Date.now() - start > maxWaitMs) {
-          this.stopStream()
-          reject(new Error(`Stream server did not start within ${maxWaitMs / 1000}s`))
-          return
-        }
-
-        const req = http.get(`http://localhost:${port}/`, (res) => {
-          res.resume()
-          if (res.statusCode && res.statusCode < 500) {
-            log.info(`[stream] Stream server ready on port ${port} (took ${((Date.now() - start) / 1000).toFixed(1)}s)`)
-            resolve()
-          } else {
-            setTimeout(poll, 1000)
-          }
-        })
-        req.on('error', () => setTimeout(poll, 1000))
-        req.setTimeout(3000, () => { req.destroy(); setTimeout(poll, 1000) })
-      }
-      // Give the process a moment to spawn before first poll
-      setTimeout(poll, 1000)
-    })
-  }
-
   cancelJob(jobId: string): boolean {
+    this.cancelledJobIds.add(jobId)
     const proc = this.activeProcesses.get(jobId)
     if (proc) {
       proc.kill()
       this.activeProcesses.delete(jobId)
       return true
     }
+    // No process currently active for this jobId (e.g. between titles in
+    // ripTitles' loop) — still record the cancellation so the loop stops
+    // before starting the next title.
     return false
+  }
+
+  /** Kill every active makemkvcon process immediately — used on app quit. */
+  killAll(): void {
+    for (const [jobId, proc] of this.activeProcesses) {
+      this.cancelledJobIds.add(jobId)
+      proc.kill()
+      this.activeProcesses.delete(jobId)
+    }
   }
 }

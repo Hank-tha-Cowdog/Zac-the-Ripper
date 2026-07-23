@@ -34,6 +34,8 @@ export const IPC = {
   JOB_LIST: 'job:list',
   JOB_STATUS: 'job:status',
   JOB_CANCEL: 'job:cancel',
+  /** Main → renderer: a follow-up job (e.g. ffv1_archival/streaming_encode queued after a primary rip) was created with a new jobId the renderer never chose itself. */
+  JOB_CREATED: 'job:created',
 
   // Settings
   SETTINGS_GET: 'settings:get',
@@ -42,10 +44,10 @@ export const IPC = {
   SETTINGS_GET_CATEGORY: 'settings:get-category',
 
   // Database
-  DB_QUERY: 'db:query',
   DB_DISCS_LIST: 'db:discs:list',
   DB_DISCS_GET: 'db:discs:get',
   DB_JOBS_LIST: 'db:jobs:list',
+  DB_JOBS_COUNT: 'db:jobs:count',
   DB_JOBS_GET: 'db:jobs:get',
   DB_JOBS_RECENT: 'db:jobs:recent',
   DB_OUTPUT_FILES_LIST: 'db:output-files:list',
@@ -89,6 +91,8 @@ export const IPC = {
 
   // MusicBrainz
   MUSICBRAINZ_LOOKUP: 'musicbrainz:lookup',
+  MUSICBRAINZ_LOOKUP_CANDIDATES: 'musicbrainz:lookup-candidates',
+  MUSICBRAINZ_LOOKUP_BY_ID: 'musicbrainz:lookup-by-id',
   MUSICBRAINZ_SEARCH: 'musicbrainz:search',
   MUSICBRAINZ_COVER_ART: 'musicbrainz:cover-art',
 

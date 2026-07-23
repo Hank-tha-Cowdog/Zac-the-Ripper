@@ -97,9 +97,14 @@ async function getToolVersion(name: string, path: string): Promise<string | null
 
 export async function checkTools(): Promise<ToolStatus[]> {
   const tools = ['makemkvcon', 'ffmpeg', 'ffprobe', 'mpv', 'ffplay', 'lsdvd', 'cdparanoia']
-  const results: ToolStatus[] = []
 
-  for (const tool of tools) {
+  // Each tool's check is a fully independent subprocess spawn (up to a 10s
+  // timeout apiece) — checking them one at a time made total startup time
+  // the SUM of all 7 checks instead of the time of the single slowest one.
+  // This runs on every app launch via App.tsx's initApp(), so it directly
+  // padded startup latency for no reason (nothing here depends on another
+  // tool's result).
+  return Promise.all(tools.map(async (tool): Promise<ToolStatus> => {
     // Priority: bundled binary > DB setting > system path search
     const bundled = getBundledBinPath(tool)
     const settingPath = getSetting(`tools.${tool}_path`)
@@ -118,13 +123,10 @@ export async function checkTools(): Promise<ToolStatus[]> {
         try { setSetting(`tools.${tool}_path`, path) } catch { /* DB might not be ready */ }
       }
 
-      results.push({ name: tool, path, available, version })
-    } else {
-      results.push({ name: tool, path: null, available: false, version: null })
+      return { name: tool, path, available, version }
     }
-  }
-
-  return results
+    return { name: tool, path: null, available: false, version: null }
+  }))
 }
 
 export async function testTool(name: string, path: string): Promise<{ available: boolean; version: string | null; error?: string }> {

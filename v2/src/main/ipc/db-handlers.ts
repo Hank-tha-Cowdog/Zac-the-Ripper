@@ -16,8 +16,12 @@ export function registerDbHandlers(): void {
   })
 
   // Jobs
-  ipcMain.handle(IPC.DB_JOBS_LIST, async (_event, filters?: { discId?: number; status?: string }) => {
+  ipcMain.handle(IPC.DB_JOBS_LIST, async (_event, filters?: jobQueries.JobListFilters) => {
     return jobQueries.listJobs(filters)
+  })
+
+  ipcMain.handle(IPC.DB_JOBS_COUNT, async (_event, filters?: Pick<jobQueries.JobListFilters, 'discId' | 'status' | 'search'>) => {
+    return jobQueries.countJobs(filters)
   })
 
   ipcMain.handle(IPC.DB_JOBS_GET, async (_event, id: number) => {

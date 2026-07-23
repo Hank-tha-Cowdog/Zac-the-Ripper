@@ -1,6 +1,6 @@
 import React from 'react'
-import { Disc3, ArrowUpFromLine } from 'lucide-react'
-import { Button, Badge, Tooltip } from '../ui'
+import { Disc3, ArrowUpFromLine, Zap, X } from 'lucide-react'
+import { Button, Badge, Tooltip, Toggle } from '../ui'
 import { useDiscStore } from '../../stores/disc-store'
 
 interface RipActionBarProps {
@@ -9,9 +9,16 @@ interface RipActionBarProps {
   onEject: () => void
   isRipping: boolean
   standbyMessage?: string | null
+  batchModeEnabled: boolean
+  onToggleBatchMode: (enabled: boolean) => void
+  autoRipCountdown: number | null
+  onCancelAutoRip: () => void
 }
 
-export function RipActionBar({ modes, onRip, onEject, isRipping, standbyMessage }: RipActionBarProps) {
+export function RipActionBar({
+  modes, onRip, onEject, isRipping, standbyMessage,
+  batchModeEnabled, onToggleBatchMode, autoRipCountdown, onCancelAutoRip
+}: RipActionBarProps) {
   const { selectedTracks, discInfo } = useDiscStore()
 
   const enabledModes = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
@@ -59,7 +66,14 @@ export function RipActionBar({ modes, onRip, onEject, isRipping, standbyMessage 
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <Tooltip content="When on, a newly-loaded disc auto-starts ripping after a short countdown (cancelable), and auto-ejects when the job finishes — for working through a stack of discs hands-free.">
+            <div className="flex items-center gap-2 pr-2 border-r border-zinc-800">
+              <Zap className={`w-3.5 h-3.5 ${batchModeEnabled ? 'text-amber-400' : 'text-zinc-600'}`} />
+              <span className="label-tech">Batch</span>
+              <Toggle checked={batchModeEnabled} onChange={onToggleBatchMode} />
+            </div>
+          </Tooltip>
           <Tooltip content="Eject the disc from the drive.">
             <Button
               variant="secondary"
@@ -84,6 +98,20 @@ export function RipActionBar({ modes, onRip, onEject, isRipping, standbyMessage 
           </Button>
         </div>
       </div>
+
+      {autoRipCountdown !== null && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2 bg-amber-500/10 border border-amber-500/30 rounded-lg animate-fade-in">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-amber-400" />
+            <span className="text-sm text-amber-300 font-mono">
+              Batch mode: auto-ripping in {autoRipCountdown}s...
+            </span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onCancelAutoRip}>
+            <X className="w-3.5 h-3.5 mr-1" /> Cancel
+          </Button>
+        </div>
+      )}
 
       {standbyMessage && (
         <div className="flex items-center gap-2 px-4 py-2 bg-purple-500/5 border border-purple-500/20 rounded-lg animate-fade-in">

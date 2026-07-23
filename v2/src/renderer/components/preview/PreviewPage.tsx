@@ -53,8 +53,8 @@ export function PreviewPage() {
 
   // Subscribe to state updates from main process
   useEffect(() => {
-    const unsubscribe = window.ztr.preview.onStateUpdate((state: PlaybackState) => {
-      setPlaybackState(state)
+    const unsubscribe = window.ztr.preview.onStateUpdate((state: unknown) => {
+      setPlaybackState(state as PlaybackState)
     })
     return () => { unsubscribe() }
   }, [])

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Eye, CheckCircle, XCircle, Clock } from 'lucide-react'
+import { Eye, CheckCircle, XCircle, Clock, Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Badge, Button, TechLabel } from '../ui'
 
 interface HistoryJob {
@@ -30,23 +30,56 @@ interface HistoryTableProps {
   onViewDetails: (jobId: number) => void
 }
 
+const PAGE_SIZE = 50
+
 export function HistoryTable({ onViewDetails }: HistoryTableProps) {
   const [jobs, setJobs] = useState<HistoryJob[]>([])
   const [filter, setFilter] = useState<string>('all')
+  const [searchInput, setSearchInput] = useState('')
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(0)
+  const [totalCount, setTotalCount] = useState(0)
 
+  // Debounce free-text search so every keystroke doesn't trigger an IPC
+  // round-trip + DB query — same input, ~300ms of typing, one query. Also
+  // resets the page here (not a separate effect watching `search`):
+  // switching filters while on page 3 could otherwise land on an empty page.
   useEffect(() => {
-    loadJobs()
-  }, [filter])
+    const timer = setTimeout(() => {
+      setSearch(searchInput.trim())
+      setPage(0)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [searchInput])
+
+  const handleFilterChange = (f: string) => {
+    setFilter(f)
+    setPage(0)
+  }
 
   const loadJobs = async () => {
     try {
-      const filters = filter !== 'all' ? { status: filter } : undefined
-      const result = await window.ztr.db.jobs.list(filters)
+      const baseFilters = {
+        status: filter !== 'all' ? filter : undefined,
+        search: search || undefined
+      }
+      const [result, count] = await Promise.all([
+        window.ztr.db.jobs.list({ ...baseFilters, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
+        window.ztr.db.jobs.count(baseFilters)
+      ])
       setJobs(result || [])
+      setTotalCount(count || 0)
     } catch {
       setJobs([])
+      setTotalCount(0)
     }
   }
+
+  useEffect(() => {
+    loadJobs()
+  }, [filter, search, page])
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
 
   const formatDuration = (seconds: number | null): string => {
     if (!seconds) return '--'
@@ -78,19 +111,30 @@ export function HistoryTable({ onViewDetails }: HistoryTableProps) {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-3">
         <TechLabel>Job History</TechLabel>
-        <div className="flex gap-1">
-          {['all', 'completed', 'failed', 'cancelled'].map((f) => (
-            <Button
-              key={f}
-              variant={filter === f ? 'primary' : 'ghost'}
-              size="sm"
-              onClick={() => setFilter(f)}
-            >
-              {f}
-            </Button>
-          ))}
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+            <input
+              className="input text-sm pl-8 py-1.5 w-56"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search title or output path..."
+            />
+          </div>
+          <div className="flex gap-1">
+            {['all', 'completed', 'failed', 'cancelled'].map((f) => (
+              <Button
+                key={f}
+                variant={filter === f ? 'primary' : 'ghost'}
+                size="sm"
+                onClick={() => handleFilterChange(f)}
+              >
+                {f}
+              </Button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -149,6 +193,25 @@ export function HistoryTable({ onViewDetails }: HistoryTableProps) {
           </tbody>
         </table>
       </div>
+
+      {totalCount > 0 && (
+        <div className="flex items-center justify-between mt-3">
+          <span className="text-xs text-zinc-600 font-mono">
+            {page * PAGE_SIZE + 1}-{Math.min((page + 1) * PAGE_SIZE, totalCount)} of {totalCount}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </Button>
+            <span className="text-xs text-zinc-500 font-mono">
+              Page {page + 1} of {totalPages}
+            </span>
+            <Button variant="ghost" size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

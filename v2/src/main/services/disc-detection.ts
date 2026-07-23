@@ -7,6 +7,8 @@ import { createLogger } from '../util/logger'
 import { findToolPath, getPlatform } from '../util/platform'
 import { CDRipperService, type CDDiscInfo } from './cd-ripper'
 import { MusicBrainzService } from './musicbrainz'
+import { parseMakeMKVInfoLine } from './makemkv-info-parser'
+import { hashString } from '../util/hash'
 
 const execFileAsync = promisify(execFile)
 const execAsync = promisify(exec)
@@ -125,11 +127,21 @@ export class DiscDetectionService {
   }
 
   /** Kill any in-flight --noscan scan process to free the drive for exclusive access */
-  private cancelInFlightScan(): void {
+  /**
+   * Kill any in-flight --noscan polling process and wait for it to actually
+   * exit before returning. Previously this fired kill() and returned
+   * immediately — kill() escalates SIGTERM→SIGKILL over up to ~5s, so the
+   * caller (getDiscInfo) could start a full `makemkvcon info` scan while the
+   * old process still held the drive, recreating the concurrent-access
+   * scenario this whole cancel-before-scan dance exists to prevent.
+   */
+  private async cancelInFlightScan(): Promise<void> {
     if (this.scanProcess) {
       log.info('cancelInFlightScan: killing in-flight --noscan process')
-      this.scanProcess.kill()
+      const proc = this.scanProcess
       this.scanProcess = null
+      proc.kill()
+      await proc.waitForExit()
     }
     this.scanInFlight = null
   }
@@ -303,7 +315,9 @@ export class DiscDetectionService {
             const { stdout } = await execFileAsync('blkid', [dev], { timeout: 5000 })
             const labelMatch = stdout.match(/LABEL="([^"]+)"/)
             if (labelMatch) discTitle = labelMatch[1]
-          } catch {}
+          } catch {
+            // blkid unavailable or drive empty — leave discTitle null
+          }
 
           drives.push({
             index: i,
@@ -406,6 +420,17 @@ export class DiscDetectionService {
   }
 
   async getDiscInfo(discIndex: number): Promise<DiscInfo | null> {
+    // A rip/backup already owns the drive — spawning a scan concurrently is
+    // exactly the concurrent-MakeMKV-access scenario this app's whole
+    // disc-polling-suppression system exists to prevent (and a plausible
+    // trigger for the v1.18.3 deadlock bug). Previously only scanDrives()
+    // (the lightweight --noscan poll) checked this; a full getDiscInfo scan
+    // — e.g. from a user clicking "Retry Scan" mid-rip — did not.
+    if (this._rippingInProgress) {
+      log.warn(`getDiscInfo(${discIndex}) — rip in progress, refusing to scan concurrently`)
+      return null
+    }
+
     // Deduplicate: if a full scan is already running, piggyback on it
     // instead of spawning a second MakeMKV process (MakeMKV can't handle concurrent access)
     if (this.fullScanInProgress && this.fullScanInFlight) {
@@ -415,7 +440,7 @@ export class DiscDetectionService {
 
     // Kill any in-flight --noscan polling process before starting a full scan,
     // because MakeMKV cannot handle concurrent drive access
-    this.cancelInFlightScan()
+    await this.cancelInFlightScan()
     this.fullScanInProgress = true
     log.info(`getDiscInfo(${discIndex}) — acquiring scan lock`)
 
@@ -453,9 +478,12 @@ export class DiscDetectionService {
    */
   private async getAudioCDInfo(discIndex: number): Promise<DiscInfo | null> {
     try {
-      // Find the device path from drives list
+      // Find the device path from drives list. DriveInfo.index is MakeMKV's
+      // own slot number, which isn't guaranteed to equal the drive's array
+      // position (a second drive, or an empty slot 0, shifts everything) —
+      // array indexing here could silently operate on the wrong drive.
       const drives = this.lastDrives || []
-      const drive = drives[discIndex]
+      const drive = drives.find(d => d.index === discIndex)
       const devicePath = drive?.devicePath || undefined
 
       const toc = await this.cdRipperService.queryTOC(devicePath)
@@ -523,15 +551,23 @@ export class DiscDetectionService {
       return null
     }
 
-    // Find the device path from the drives list
+    // Find the device path from the drives list. DriveInfo.index is
+    // MakeMKV's own slot number, not necessarily the array position.
     const drives = this.lastDrives || []
-    const drive = drives[discIndex]
+    const drive = drives.find(d => d.index === discIndex)
     if (!drive) {
       log.warn(`lsdvd fallback: no drive at index ${discIndex}`)
       return null
     }
+    if (!drive.devicePath) {
+      // Previously guessed `/dev/rdisk${discIndex + 4}` here — an arbitrary,
+      // machine-specific number with no basis, which would silently scan
+      // the wrong (or a nonexistent) device on most systems.
+      log.warn(`lsdvd fallback: drive at index ${discIndex} has no known device path`)
+      return null
+    }
 
-    const devicePath = drive.devicePath || `/dev/rdisk${discIndex + 4}` // fallback guess
+    const devicePath = drive.devicePath
 
     try {
       log.info(`lsdvd fallback: scanning ${devicePath} with JSON output`)
@@ -552,7 +588,11 @@ export class DiscDetectionService {
       }
 
       info.title = (lsdvdData.title as string) || drive.discTitle || 'Unknown'
-      info.discId = (lsdvdData.device as string) || `lsdvd-${devicePath}`
+      // discId is computed below, after track parsing — it needs to be
+      // disc-specific (lsdvd's `device` field is the drive's device path,
+      // which is identical for every disc ever inserted into this drive;
+      // using it as discId let two different discs collide in the DB and
+      // TMDB cache, since both are keyed by discId).
       info.discType = 'DVD' // lsdvd only works with DVDs
 
       const lsdvdTracks = (lsdvdData.track as Array<Record<string, unknown>>) || []
@@ -664,8 +704,17 @@ export class DiscDetectionService {
         }
       }
 
-      // Compute fingerprint
+      // Compute a disc-specific identity. lsdvd's volume-label field reports
+      // the literal string "unknown" when it can't read a real label (not
+      // just when actually absent) — treat that as meaningless. Either way,
+      // fold in a hash of the disc's own structure (track count + per-track
+      // durations) so discId is stable per physical disc content, not per
+      // drive.
       const trackFingerprint = tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+      const volumeLabel = (lsdvdData.title as string || '').trim()
+      const hasMeaningfulLabel = volumeLabel.length > 0 && volumeLabel.toLowerCase() !== 'unknown'
+      const structureHash = hashString(trackFingerprint)
+      info.discId = hasMeaningfulLabel ? `${volumeLabel}-${structureHash}` : structureHash
       info.fingerprint = `${info.discId}::${tracks.length}::${trackFingerprint}`
 
       log.info(`lsdvd fallback result: title="${info.title}" type=DVD discId="${info.discId}" tracks=${info.trackCount}`)
@@ -704,8 +753,12 @@ export class DiscDetectionService {
 
       const titleMatch = stdout.match(/^Disc Title:\s*(.+)/m)
       info.title = titleMatch ? titleMatch[1].trim() : drive.discTitle || 'Unknown'
+      // lsdvd -c computes a real CRC-based DVDDiscID when it can; only fall
+      // back to a structural hash (computed below, once tracks are parsed)
+      // when that's unavailable — never to the device path, which is the
+      // same for every disc ever inserted into this drive.
       const discIdMatch = stdout.match(/^DVDDiscID:\s*(\S+)/m)
-      info.discId = discIdMatch ? discIdMatch[1] : `lsdvd-${devicePath}`
+      info.discId = discIdMatch ? discIdMatch[1] : undefined
       info.discType = 'DVD'
 
       const titleRegex = /^Title:\s*(\d+),\s*Length:\s*([\d:.]+)\s*Chapters:\s*(\d+).*Audio streams:\s*(\d+).*Subpictures:\s*(\d+)/gm
@@ -771,6 +824,7 @@ export class DiscDetectionService {
       info.trackCount = tracks.length
 
       const trackFingerprint = tracks.map(t => `${t.id}:${t.durationSeconds}`).join('|')
+      if (!info.discId) info.discId = hashString(trackFingerprint)
       info.fingerprint = `${info.discId}::${tracks.length}::${trackFingerprint}`
 
       log.info(`lsdvd text fallback result: title="${info.title}" tracks=${info.trackCount}`)
@@ -804,7 +858,9 @@ export class DiscDetectionService {
         const { stdout: listOut } = await execFileAsync('diskutil', ['list', devicePath], { timeout: 10000 })
         const titleMatch = listOut.match(/\d+:\s+\S*\s+(\S+)\s+\*?[\d.]+/m)
         if (titleMatch) discTitle = titleMatch[1].trim()
-      } catch {}
+      } catch {
+        // diskutil lookup failed — keep the 'Unknown Disc' default
+      }
 
       let discType: 'DVD' | 'BD' | 'UHD_BD' = 'DVD'
       if (bookType.includes('BD') || bookType.includes('Blu-ray')) {
@@ -815,11 +871,21 @@ export class DiscDetectionService {
         ? (sizeMatch[2] === 'GB' ? `${sizeMatch[1]} GB` : `${sizeMatch[1]} MB`)
         : 'Unknown'
 
+      // No MakeMKV/lsdvd here, so there's no track structure to fingerprint —
+      // this tier has the weakest disc-identity signal available. When a
+      // real volume label is readable, combine it with size (better than a
+      // bare device path, which is identical for every disc ever inserted
+      // into this drive). When there's truly no label, device path is still
+      // the best available *stable* signal — the alternative is inventing
+      // something that changes on every scan of the same disc, which would
+      // make "did the disc change" detection think it changes constantly.
+      const osDiscId = discTitle !== 'Unknown Disc' ? `${discTitle}-${totalSize}` : devicePath
+
       return {
         title: discTitle,
         discType,
-        discId: devicePath,
-        fingerprint: `${devicePath}::0::`,
+        discId: osDiscId,
+        fingerprint: `${osDiscId}::0::`,
         trackCount: 0,
         tracks: [],
         metadata: {
@@ -844,6 +910,12 @@ export class DiscDetectionService {
       metadata: {}
     }
     const trackMap = new Map<number, TrackInfo>()
+    // MakeMKV's SINFO lines don't repeat the stream's type (Audio/Subtitles/
+    // Video) on every attribute — only the attrId=1 line for that stream
+    // carries it. Every later attribute (language, codec, ...) for the same
+    // stream has to be routed using this remembered type. Keyed by
+    // "trackId:streamId".
+    const streamTypeMap = new Map<string, string>()
 
     log.info(`getDiscInfo(${discIndex}) — scanning disc...`)
     return new Promise((resolve) => {
@@ -896,7 +968,11 @@ export class DiscDetectionService {
 
           // Log everything for debugging disc scan issues
           if (line.startsWith('MSG:')) {
-            const match = line.match(/MSG:\d+,\d+,\d+,"(.+)"/)
+            // MakeMKV's real format is MSG:code,flags,count,"message","format",params...
+            // — a greedy (.+)" here captures through the LAST quote on the
+            // line (i.e. "message","format",param0,...), not just the
+            // message. [^"]* stops at the first closing quote instead.
+            const match = line.match(/MSG:\d+,\d+,\d+,"([^"]*)"/)
             if (match) log.info(`MakeMKV: ${match[1]}`)
           } else if (line.startsWith('PRGC:') || line.startsWith('PRGT:') || line.startsWith('PRGV:')) {
             // Log progress at info level during analysis phase for visibility
@@ -916,7 +992,7 @@ export class DiscDetectionService {
             log.info(`MakeMKV: ${line}`)
           }
 
-          this.parseInfoLine(line, info, trackMap)
+          parseMakeMKVInfoLine(line, info, trackMap, streamTypeMap)
         },
         onStderr: (line) => {
           lastActivityTime = Date.now()
@@ -1004,145 +1080,6 @@ export class DiscDetectionService {
     })
   }
 
-  private parseInfoLine(line: string, info: Partial<DiscInfo>, trackMap: Map<number, TrackInfo>): void {
-    // CINFO: disc-level info
-    if (line.startsWith('CINFO:')) {
-      const match = line.match(/CINFO:(\d+),(\d+),"?([^"]*)"?/)
-      if (match) {
-        const [, attrId, , value] = match
-        switch (attrId) {
-          case '2': // Title
-            info.title = value
-            break
-          case '28': // Disc type comment
-            if (value.includes('Blu-ray')) {
-              info.discType = value.includes('UHD') ? 'UHD_BD' : 'BD'
-            } else {
-              info.discType = 'DVD'
-            }
-            break
-          case '30': // Volume name / disc ID
-            info.discId = value
-            break
-        }
-      }
-    }
-
-    // TINFO: track-level info
-    if (line.startsWith('TINFO:')) {
-      const match = line.match(/TINFO:(\d+),(\d+),(\d+),"?([^"]*)"?/)
-      if (match) {
-        const [, trackIdStr, attrId, , value] = match
-        const trackId = parseInt(trackIdStr)
-
-        if (!trackMap.has(trackId)) {
-          trackMap.set(trackId, {
-            id: trackId,
-            title: `Title ${trackId}`,
-            duration: '0:00:00',
-            durationSeconds: 0,
-            size: '0 MB',
-            sizeBytes: 0,
-            chapters: 0,
-            resolution: '',
-            framerate: '',
-            isInterlaced: false,
-            audioTracks: [],
-            subtitleTracks: []
-          })
-        }
-
-        const track = trackMap.get(trackId)!
-        switch (attrId) {
-          case '2': track.title = value; break
-          case '9':
-            track.duration = value
-            track.durationSeconds = this.parseDuration(value)
-            break
-          case '10':
-            track.size = value
-            track.sizeBytes = this.parseSize(value)
-            break
-          case '8': track.chapters = parseInt(value) || 0; break
-          case '19':
-            track.resolution = value
-            track.isInterlaced = value.includes('i')
-            break
-          case '21': track.framerate = value; break
-        }
-      }
-    }
-
-    // SINFO: stream-level info (audio/subtitle tracks within a title)
-    if (line.startsWith('SINFO:')) {
-      const match = line.match(/SINFO:(\d+),(\d+),(\d+),(\d+),"?([^"]*)"?/)
-      if (match) {
-        const [, trackIdStr, streamIdStr, attrId, streamType, value] = match
-        const trackId = parseInt(trackIdStr)
-        const streamId = parseInt(streamIdStr)
-        const track = trackMap.get(trackId)
-        if (!track) return
-
-        if (streamType === '2' || attrId === '1') {
-          this.parseAudioStream(track, streamId, attrId, value)
-        } else if (streamType === '3') {
-          this.parseSubtitleStream(track, streamId, attrId, value)
-        }
-      }
-    }
-  }
-
-  private parseAudioStream(track: TrackInfo, streamId: number, attrId: string, value: string): void {
-    let audio = track.audioTracks.find(a => a.id === streamId)
-    if (!audio) {
-      audio = { id: streamId, codec: '', language: '', channels: '', bitrate: '' }
-      track.audioTracks.push(audio)
-    }
-    switch (attrId) {
-      case '2': audio.codec = value; break
-      case '3': audio.language = value; break
-      case '4': audio.channels = value; break
-      case '5': audio.bitrate = value; break
-    }
-  }
-
-  private parseSubtitleStream(track: TrackInfo, streamId: number, attrId: string, value: string): void {
-    let sub = track.subtitleTracks.find(s => s.id === streamId)
-    if (!sub) {
-      sub = { id: streamId, type: 'unknown', language: '', codec: '' }
-      track.subtitleTracks.push(sub)
-    }
-    switch (attrId) {
-      case '2':
-        sub.codec = value
-        if (value.includes('VobSub')) sub.type = 'vobsub'
-        else if (value.includes('PGS')) sub.type = 'pgs'
-        else if (value.includes('SRT')) sub.type = 'srt'
-        else if (value.includes('608')) sub.type = 'cc608'
-        else if (value.includes('708')) sub.type = 'cc708'
-        break
-      case '3': sub.language = value; break
-    }
-  }
-
-  private parseDuration(str: string): number {
-    const parts = str.split(':').map(Number)
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-    if (parts.length === 2) return parts[0] * 60 + parts[1]
-    return parts[0] || 0
-  }
-
-  private parseSize(str: string): number {
-    const match = str.match(/([\d.]+)\s*(GB|MB|KB)/)
-    if (!match) return 0
-    const num = parseFloat(match[1])
-    switch (match[2]) {
-      case 'GB': return num * 1073741824
-      case 'MB': return num * 1048576
-      case 'KB': return num * 1024
-      default: return num
-    }
-  }
 }
 
 // Singleton instance — shared across all IPC handlers

@@ -38,12 +38,6 @@ export function HistoryDetailModal({ jobId, isOpen, onClose }: HistoryDetailModa
   const [job, setJob] = useState<JobDetail | null>(null)
   const [files, setFiles] = useState<OutputFile[]>([])
 
-  useEffect(() => {
-    if (jobId && isOpen) {
-      loadDetails(jobId)
-    }
-  }, [jobId, isOpen])
-
   const loadDetails = async (id: number) => {
     try {
       const [jobData, filesData] = await Promise.all([
@@ -52,8 +46,16 @@ export function HistoryDetailModal({ jobId, isOpen, onClose }: HistoryDetailModa
       ])
       setJob(jobData)
       setFiles(filesData || [])
-    } catch {}
+    } catch (err) {
+      console.error('Failed to load job details:', err)
+    }
   }
+
+  useEffect(() => {
+    if (jobId && isOpen) {
+      loadDetails(jobId)
+    }
+  }, [jobId, isOpen])
 
   const formatDuration = (seconds: number | null): string => {
     if (!seconds) return '--'

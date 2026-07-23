@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { CheckCircle, XCircle, Clock } from 'lucide-react'
-import { Card, Badge, TechLabel } from '../ui'
+import { Badge, TechLabel } from '../ui'
 
 interface RecentJob {
   id: number
@@ -14,18 +14,24 @@ interface RecentJob {
 export function RecentRipsPanel() {
   const [recentJobs, setRecentJobs] = useState<RecentJob[]>([])
 
-  useEffect(() => {
-    loadRecent()
-  }, [])
-
   const loadRecent = async () => {
     try {
-      const jobs = await window.ztr.db.jobs.list({ status: 'completed' })
-      setRecentJobs((jobs || []).slice(0, 10))
+      // db.jobs.list() has no LIMIT — it fetches every job ever recorded
+      // across IPC just to keep 10, getting linearly slower as history
+      // accumulates. db.jobs.recent() is the same query bounded in SQL
+      // (LIMIT), and also includes 'failed' jobs — this panel already had
+      // an XCircle icon branch for non-completed jobs (below) that could
+      // never fire against the old completed-only filter.
+      const jobs = await window.ztr.db.jobs.recent(10)
+      setRecentJobs(jobs || [])
     } catch {
       // DB might not have data yet
     }
   }
+
+  useEffect(() => {
+    loadRecent()
+  }, [])
 
   const formatDuration = (seconds: number | null): string => {
     if (!seconds) return '--'
@@ -48,7 +54,7 @@ export function RecentRipsPanel() {
     <div>
       <TechLabel>Recent Rips</TechLabel>
       {recentJobs.length === 0 ? (
-        <div className="mt-2 text-sm text-zinc-600">No completed rips yet</div>
+        <div className="mt-2 text-sm text-zinc-600">No finished rips yet</div>
       ) : (
         <div className="mt-2 space-y-1">
           {recentJobs.map((job) => (

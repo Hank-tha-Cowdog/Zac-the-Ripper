@@ -210,6 +210,13 @@ export function useRipSettings() {
     [saveSetting]
   )
 
+  // --- Persistent: batch/auto-rip mode (off by default — see RipPage) ---
+  const batchModeEnabled = settings['general.batch_mode_enabled'] === 'true'
+  const setBatchModeEnabled = useCallback(
+    (v: boolean) => saveSetting('general.batch_mode_enabled', String(v)),
+    [saveSetting]
+  )
+
   return {
     // Persistent
     modes,
@@ -238,6 +245,10 @@ export function useRipSettings() {
     // Local ingest
     localIngestMode,
     setLocalIngestMode,
+
+    // Batch/auto-rip mode
+    batchModeEnabled,
+    setBatchModeEnabled,
 
     // Collection name persistence
     persistedCollectionName,

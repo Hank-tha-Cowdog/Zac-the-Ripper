@@ -21,6 +21,7 @@ export function registerRipHandlers(): void {
     isIngest?: boolean
     ingestFiles?: string[]
     posterUrl?: string
+    expectedDiscId?: string
   }) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { error: 'No window found' }

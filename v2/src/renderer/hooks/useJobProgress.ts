@@ -1,66 +1,66 @@
 import { useEffect } from 'react'
-import { useJobsStore } from '../stores/jobs-store'
+import { useJobsStore, type JobProgress } from '../stores/jobs-store'
+
+/**
+ * Some progress events (notably ffmpeg's separate "speed=" line, sent on
+ * its own without out_time_us) carry a message/speed update with no
+ * percentage field at all. updateJobProgress does a plain {...job, ...updates}
+ * merge, so including `percentage: undefined` in the update object
+ * overwrites the job's last known-good percentage with undefined — which
+ * ProgressBar then renders as the literal string "NaN%". Omitting the key
+ * entirely (not just passing undefined) keeps the merge a no-op for it.
+ */
+export function withDefinedPercentage(updates: { percentage?: number; message: string; speed?: number; status: 'running' }): Partial<JobProgress> {
+  if (typeof updates.percentage === 'number' && !Number.isNaN(updates.percentage)) {
+    return updates
+  }
+  const { percentage: _drop, ...rest } = updates
+  return rest
+}
 
 export function useJobProgress() {
-  const { updateJobProgress, completeJob, failJob, addLog } = useJobsStore()
+  const { addJob, updateJobProgress, completeJob, failJob } = useJobsStore()
 
   useEffect(() => {
+    // ── Follow-up jobs (ffv1_archival/streaming_encode queued after a
+    // primary rip) mint their own jobId in the main process with no
+    // renderer-initiated addJob() call — without this listener, their
+    // progress/complete/error events arrive for a jobId the store has
+    // never seen and silently no-op.
+    const cleanupCreated = window.ztr.jobs.onCreated((data: unknown) => {
+      const d = data as { jobId: string; dbId: number; type: string }
+      const known = useJobsStore.getState().activeJobs.some(j => j.jobId === d.jobId)
+      if (known) return
+      addJob({
+        jobId: d.jobId,
+        dbId: d.dbId,
+        type: d.type,
+        status: 'pending',
+        percentage: 0,
+        message: 'Queued...'
+      })
+    })
+
     // ── RIP events ──────────────────────────────────────────────
     const cleanupProgress = window.ztr.rip.onProgress((data: unknown) => {
       const d = data as { jobId: string; percentage: number; message: string; speed?: number }
-      const job = useJobsStore.getState().activeJobs.find(j => j.jobId === d.jobId)
 
-      // kodi_export pipeline manages its own progress (already scaled 0-100)
-      // Non-kodi jobs: pass through directly
-      const isKodiPipeline = job?.type === 'kodi_export'
-
-      updateJobProgress(d.jobId, {
+      updateJobProgress(d.jobId, withDefinedPercentage({
         percentage: d.percentage,
         message: d.message,
         speed: d.speed,
         status: 'running'
-      })
-
-      addLog({
-        timestamp: new Date().toISOString(),
-        level: 'info',
-        message: d.message,
-        jobId: d.jobId
-      })
+      }))
     })
 
     const cleanupComplete = window.ztr.rip.onComplete((data: unknown) => {
       const d = data as { jobId: string; outputFiles?: string[]; readErrorSummary?: string }
       completeJob(d.jobId, d.outputFiles)
-
-      if (d.readErrorSummary) {
-        addLog({
-          timestamp: new Date().toISOString(),
-          level: 'warn',
-          message: `Completed with disc read errors: ${d.readErrorSummary}`,
-          jobId: d.jobId
-        })
-      }
-
-      addLog({
-        timestamp: new Date().toISOString(),
-        level: 'info',
-        message: d.readErrorSummary
-          ? 'Job completed with warnings — some sectors were unreadable'
-          : 'Job completed successfully',
-        jobId: d.jobId
-      })
     })
 
     const cleanupError = window.ztr.rip.onError((data: unknown) => {
       const d = data as { jobId: string; error: string }
       failJob(d.jobId, d.error)
-      addLog({
-        timestamp: new Date().toISOString(),
-        level: 'error',
-        message: d.error,
-        jobId: d.jobId
-      })
     })
 
     // ── Encode events (for standalone encode jobs, NOT kodi pipeline) ──
@@ -72,12 +72,12 @@ export function useJobProgress() {
       // not IPC encode events — ignore encode events for kodi jobs
       if (job?.type === 'kodi_export') return
 
-      updateJobProgress(d.jobId, {
+      updateJobProgress(d.jobId, withDefinedPercentage({
         percentage: d.percentage,
         message: d.message,
         speed: d.speed,
         status: 'running'
-      })
+      }))
     })
 
     const cleanupEncComplete = window.ztr.encode.onComplete((data: unknown) => {
@@ -101,6 +101,7 @@ export function useJobProgress() {
     })
 
     return () => {
+      cleanupCreated()
       cleanupProgress()
       cleanupComplete()
       cleanupError()
@@ -108,5 +109,5 @@ export function useJobProgress() {
       cleanupEncComplete()
       cleanupEncError()
     }
-  }, [updateJobProgress, completeJob, failJob, addLog])
+  }, [addJob, updateJobProgress, completeJob, failJob])
 }

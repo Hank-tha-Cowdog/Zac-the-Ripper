@@ -1,31 +1,45 @@
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
 import { tmpdir, homedir } from 'os'
 import { join, dirname } from 'path'
-import { mkdirSync, rmSync, copyFileSync, existsSync, readdirSync } from 'fs'
+import { mkdirSync, rmSync, copyFileSync, existsSync, readdirSync, renameSync, constants as fsConstants } from 'fs'
 import { MakeMKVService } from './makemkv'
 import { FFmpegService } from './ffmpeg'
 import { FFmpegRipperService } from './ffmpeg-ripper'
 import { FFprobeService } from './ffprobe'
 import { KodiOutputService, EXTRAS_FOLDER_MAP } from './kodi-output'
-import { TMDBService } from './tmdb'
+import { TMDBService, type TMDBDetails } from './tmdb'
 import { CDRipperService } from './cd-ripper'
 import { MusicBrainzService } from './musicbrainz'
+import { buildFlacEncodeArgs } from './flac-tags'
+import { validateDiscFreshness } from './disc-freshness'
 import type { DiscInfo } from './disc-detection'
-import type { ReadError } from './makemkv'
+import type { ReadError, RipResult } from './makemkv'
 import * as jobQueries from '../database/queries/jobs'
 import * as discQueries from '../database/queries/discs'
 import * as outputFileQueries from '../database/queries/output-files'
 import { getSetting } from '../database/queries/settings'
 import { getEncodingArgs } from '../encoding-presets'
 import { createLogger } from '../util/logger'
+import { safeSend } from '../util/safe-send'
+import { sanitizeMusicFilename } from '../util/sanitize'
+import { Semaphore } from '../util/semaphore'
+import { writeStatusSnapshot } from '../util/status-snapshot'
 import { IPC } from '../../shared/ipc-channels'
 import { notifyJobComplete, notifyJobFailed } from './notify'
 import { getDiscDetectionService } from './disc-detection'
 
 const log = createLogger('job-queue')
+
+// Copy-on-write hint for APFS/btrfs/XFS-reflink — turns a multi-GB video
+// copy (e.g. writing the same rip into both a Plex and a Jellyfin library)
+// into a near-instant, near-zero-extra-disk-space clone instead of a full
+// byte copy. Node falls back to a normal copy automatically on filesystems
+// that don't support it (exFAT/NTFS network shares, etc.), so this is
+// always safe to pass.
+const CLONE_IF_SUPPORTED = fsConstants.COPYFILE_FICLONE
 
 /** Expand leading ~ to the user's home directory */
 function expandPath(p: string): string {
@@ -35,11 +49,24 @@ function expandPath(p: string): string {
   return p
 }
 
+
 interface QueuedJob {
   id: string
   dbId: number
   type: string
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  /** Present for jobs that may invoke MakeMKV, so cancelJob can reach it —
+   * MakeMKV rips/backups aren't tracked anywhere else the queue can find. */
+  makemkvService?: MakeMKVService
+  /** Set true by cancelJob(); checked between pipeline phases so a cancelled
+   * job actually stops instead of running to completion and overwriting the
+   * 'cancelled' DB status with 'completed' or 'failed'. */
+  cancelRequested?: boolean
+  /** Latest reported progress, for status.json — set by the media-library
+   * and music pipelines' sendProgress() closures. Not populated by the
+   * narrower standalone mkv_rip/raw_capture/encode-only paths. */
+  progress?: number
+  message?: string
 }
 
 export class JobQueueService {
@@ -52,7 +79,11 @@ export class JobQueueService {
   private tmdbService = new TMDBService()
   private cdRipperService = new CDRipperService()
   private musicBrainzService = new MusicBrainzService()
-  private processing = false
+  // Bounds concurrent ffmpeg encodes — without this, a multi-title rip with
+  // both FFV1 archival and streaming modes enabled fires every title's
+  // encode(s) at once (N titles × 2 presets), saturating CPU/disk with no
+  // back-pressure.
+  private encodeSemaphore = new Semaphore(2)
 
   static getInstance(): JobQueueService {
     if (!this.instance) {
@@ -75,14 +106,27 @@ export class JobQueueService {
     isIngest?: boolean
     ingestFiles?: string[]
     posterUrl?: string
+    /** The disc the renderer had loaded when the user made their track selection — verified below against a fresh scan. */
+    expectedDiscId?: string
     window: BrowserWindow
     makemkvService: MakeMKVService
-  }): Promise<{ jobId: string; dbId: number }> {
+  }): Promise<{ jobId: string; dbId: number; type: string }> {
     const { discIndex, titleIds, modes, window, makemkvService, discSetId, discNumber } = params
     const outputDir = expandPath(params.outputDir)
 
     // Create disc record
     const discInfo = await getDiscDetectionService().getDiscInfo(discIndex)
+
+    const freshness = validateDiscFreshness({
+      isIngest: params.isIngest,
+      discInfo,
+      expectedDiscId: params.expectedDiscId,
+      titleIds
+    })
+    if (!freshness.valid) {
+      throw new Error(freshness.error)
+    }
+
     const disc = discQueries.createDisc({
       title: discInfo?.title || `Disc ${discIndex}`,
       disc_type: discInfo?.discType || 'DVD',
@@ -106,10 +150,37 @@ export class JobQueueService {
       if (isPlex) libraryTargets.push({ type: 'plex_export', path: expandPath(getSetting('plex.library_path') || '') })
       if (isKodi) libraryTargets.push({ type: 'kodi_export', path: expandPath(getSetting('kodi.library_path') || '') })
 
-      // Primary target: first enabled library; additional targets get copies
-      const primaryType = libraryTargets[0].type
-      const primaryPath = libraryTargets[0].path
-      const additionalPaths = libraryTargets.slice(1).map(t => t.path).filter(Boolean)
+      // Primary target: first enabled library that actually has a
+      // configured path. Picking index 0 unconditionally could make an
+      // *unconfigured* library (empty path setting) "primary" while a
+      // properly configured one gets relegated to an additional-copy
+      // target — the encode would then write its main output through
+      // path.join('', 'Movies', ...), landing in some CWD-relative
+      // location no library (or user) would ever find.
+      // Dedupe by resolved path — Jellyfin and Plex (or Kodi) commonly
+      // point at the SAME shared library folder (one folder, multiple
+      // servers scanning it), which previously meant "copy to additional
+      // libraries" tried to copy the primary output onto itself (safe —
+      // verified copyFileSync no-ops on identical src/dest — but pointless)
+      // and inserted a duplicate output_files DB row for the exact same
+      // path, showing the same file twice in this app's own history view.
+      const seenPaths = new Set<string>()
+      const configuredTargets = libraryTargets.filter(t => {
+        if (!t.path || seenPaths.has(t.path)) return false
+        seenPaths.add(t.path)
+        return true
+      })
+      if (configuredTargets.length === 0) {
+        const enabledTypes = libraryTargets.map(t => t.type.replace('_export', '')).join('/')
+        throw new Error(`No library path configured for the selected export target(s) (${enabledTypes}) — set one in Settings first.`)
+      }
+      const primaryType = configuredTargets[0].type
+      const primaryPath = configuredTargets[0].path
+      const additionalPaths = configuredTargets.slice(1).map(t => t.path)
+      // Same order/length as additionalPaths — lets the pipeline know
+      // which additional copy (if any) is going to a Plex library, so it
+      // can apply Plex's {tmdb-X} exact-match folder/file naming there.
+      const additionalTypes = configuredTargets.slice(1).map(t => t.type)
 
       const dbJobType = primaryType as 'kodi_export' | 'jellyfin_export' | 'plex_export'
       const kodiOpts = params.kodiOptions as { title?: string } | undefined
@@ -118,17 +189,17 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: dbJobType,
         output_path: primaryPath || outputDir,
-        movie_title: kodiOpts?.title || null,
+        movie_title: kodiOpts?.title || undefined,
         poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
-      this.queue.push({ id: jobId, dbId: job.id, type: primaryType, status: 'pending' })
+      this.queue.push({ id: jobId, dbId: job.id, type: primaryType, status: 'pending', makemkvService })
 
       log.info(`[media-lib] Created ${primaryType} job ${jobId} — library=${primaryPath}` +
         (additionalPaths.length > 0 ? `, additional=[${additionalPaths.join(', ')}]` : ''))
 
-      this.executeMediaLibraryPipeline(jobId, job.id, {
+      this.runDetached(jobId, job.id, this.executeMediaLibraryPipeline(jobId, job.id, {
         discIndex,
         titleIds,
         outputDir,
@@ -141,15 +212,17 @@ export class JobQueueService {
         kodiOptions: params.kodiOptions,
         discId: disc.id,
         primaryLibraryPath: primaryPath,
+        primaryLibraryType: primaryType,
         additionalLibraryPaths: additionalPaths,
+        additionalLibraryTypes: additionalTypes,
         discSetId,
         discNumber,
         discInfo: discInfo || undefined,
         isIngest: params.isIngest,
         ingestFiles: params.ingestFiles
-      })
+      }))
 
-      return { jobId, dbId: job.id }
+      return { jobId, dbId: job.id, type: primaryType }
     }
 
     // Extract user-entered title for all job types
@@ -161,15 +234,15 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: 'mkv_rip',
         output_path: outputDir,
-        movie_title: kodiOpts?.title || null,
+        movie_title: kodiOpts?.title || undefined,
         poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
-      this.queue.push({ id: jobId, dbId: mkvJob.id, type: 'mkv_rip', status: 'pending' })
+      this.queue.push({ id: jobId, dbId: mkvJob.id, type: 'mkv_rip', status: 'pending', makemkvService })
 
       // Start ripping immediately
-      this.executeRipJob(jobId, mkvJob.id, {
+      this.runDetached(jobId, mkvJob.id, this.executeRipJob(jobId, mkvJob.id, {
         discIndex,
         titleIds,
         outputDir,
@@ -181,9 +254,9 @@ export class JobQueueService {
         kodiOptions: params.kodiOptions,
         discId: disc.id,
         discInfo: discInfo || undefined
-      })
+      }))
 
-      return { jobId, dbId: mkvJob.id }
+      return { jobId, dbId: mkvJob.id, type: 'mkv_rip' }
     }
 
     // Raw capture mode
@@ -192,24 +265,24 @@ export class JobQueueService {
         disc_id: disc.id,
         job_type: 'raw_capture',
         output_path: outputDir,
-        movie_title: kodiOpts?.title || null,
+        movie_title: kodiOpts?.title || undefined,
         poster_url: params.posterUrl || undefined
       })
 
       const jobId = randomUUID()
-      this.queue.push({ id: jobId, dbId: rawJob.id, type: 'raw_capture', status: 'pending' })
+      this.queue.push({ id: jobId, dbId: rawJob.id, type: 'raw_capture', status: 'pending', makemkvService })
 
-      this.executeBackupJob(jobId, rawJob.id, {
+      this.runDetached(jobId, rawJob.id, this.executeBackupJob(jobId, rawJob.id, {
         discIndex,
         outputDir,
         window,
         makemkvService
-      })
+      }))
 
-      return { jobId, dbId: rawJob.id }
+      return { jobId, dbId: rawJob.id, type: 'raw_capture' }
     }
 
-    return { jobId: '', dbId: 0 }
+    return { jobId: '', dbId: 0, type: '' }
   }
 
   async createEncodeJob(params: {
@@ -233,7 +306,14 @@ export class JobQueueService {
     const jobId = randomUUID()
     this.queue.push({ id: jobId, dbId: job.id, type: job.job_type, status: 'pending' })
 
-    this.executeEncodeJob(jobId, job.id, { ...params })
+    // Follow-up jobs (ffv1_archival/streaming_encode queued after a
+    // primary rip) mint their own jobId here, one the renderer never chose
+    // and has no other way to learn about — without this broadcast,
+    // progress/complete/error events for it arrive with an unrecognized
+    // jobId and silently no-op against the renderer's job store.
+    safeSend(window, IPC.JOB_CREATED, { jobId, dbId: job.id, type: job.job_type })
+
+    this.runDetached(jobId, job.id, this.executeEncodeJob(jobId, job.id, { ...params }))
 
     return { jobId, dbId: job.id }
   }
@@ -282,7 +362,7 @@ export class JobQueueService {
         // Build read error summary for UI
         const readErrorSummary = this.buildReadErrorSummary(result.readErrors)
 
-        window.webContents.send(IPC.RIP_COMPLETE, {
+        safeSend(window, IPC.RIP_COMPLETE, {
           jobId,
           outputFiles: result.outputFiles,
           readErrors: result.readErrors,
@@ -322,7 +402,7 @@ export class JobQueueService {
         // MakeMKV failed — try ffmpeg VOB fallback for DVDs
         if (params.discInfo?.discType === 'DVD' && params.discInfo?.tracks?.length > 0) {
           log.info(`[rip] MakeMKV failed — attempting ffmpeg VOB fallback for DVD`)
-          window.webContents.send(IPC.RIP_PROGRESS, {
+          safeSend(window, IPC.RIP_PROGRESS, {
             jobId, percentage: 5,
             message: 'MakeMKV failed, trying ffmpeg VOB fallback...'
           })
@@ -331,7 +411,7 @@ export class JobQueueService {
             jobId, discInfo: params.discInfo, titleIds,
             outputDir, window,
             onProgress: (pct, message) => {
-              window.webContents.send(IPC.RIP_PROGRESS, {
+              safeSend(window, IPC.RIP_PROGRESS, {
                 jobId, percentage: pct,
                 message: `Extracting (ffmpeg): ${pct.toFixed(0)}%`
               })
@@ -347,7 +427,7 @@ export class JobQueueService {
               outputFileQueries.createOutputFile({ job_id: dbId, file_path: filePath, format: 'mkv' })
             }
 
-            window.webContents.send(IPC.RIP_COMPLETE, {
+            safeSend(window, IPC.RIP_COMPLETE, {
               jobId, outputFiles: fallbackResult.outputFiles,
               readErrorSummary: 'Ripped via ffmpeg VOB fallback (MakeMKV failed)'
             })
@@ -377,13 +457,13 @@ export class JobQueueService {
           } else {
             jobQueries.updateJobStatus(dbId, 'failed', { error_message: fallbackResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed' })
             this.updateQueueItem(jobId, 'failed')
-            window.webContents.send(IPC.RIP_ERROR, { jobId, error: fallbackResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed' })
+            safeSend(window, IPC.RIP_ERROR, { jobId, error: fallbackResult.error || 'Both MakeMKV and ffmpeg VOB fallback failed' })
             notifyJobFailed('MKV Rip', fallbackResult.error || 'Both MakeMKV and ffmpeg fallback failed').catch(() => {})
           }
         } else {
           jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
           this.updateQueueItem(jobId, 'failed')
-          window.webContents.send(IPC.RIP_ERROR, { jobId, error: result.error })
+          safeSend(window, IPC.RIP_ERROR, { jobId, error: result.error })
           notifyJobFailed('MKV Rip', result.error).catch(() => {})
         }
       }
@@ -391,7 +471,7 @@ export class JobQueueService {
       const msg = err instanceof Error ? err.message : String(err)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
-      window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      safeSend(window, IPC.RIP_ERROR, { jobId, error: msg })
       notifyJobFailed('MKV Rip', msg).catch(() => {})
     } finally {
       getDiscDetectionService().rippingInProgress = false
@@ -425,7 +505,9 @@ export class JobQueueService {
     kodiOptions?: unknown
     discId: number
     primaryLibraryPath: string
+    primaryLibraryType?: string
     additionalLibraryPaths?: string[]
+    additionalLibraryTypes?: string[]
     discSetId?: number
     discNumber?: number
     discInfo?: DiscInfo
@@ -464,7 +546,9 @@ export class JobQueueService {
     let phase: 'rip' | 'encode' | 'encode-finishing' | 'kodi-org' | 'done' = 'rip'
 
     const sendProgress = (pct: number, message: string) => {
-      window.webContents.send(IPC.RIP_PROGRESS, { jobId, percentage: pct, message })
+      const item = this.queue.find(q => q.id === jobId)
+      if (item) { item.progress = pct; item.message = message }
+      safeSend(window, IPC.RIP_PROGRESS, { jobId, percentage: pct, message })
     }
 
     try {
@@ -472,7 +556,7 @@ export class JobQueueService {
       if (!primaryLibraryPath) throw new Error('Library path not configured — set it in Settings > Jellyfin or Settings > Kodi')
 
       // TV shows use a completely different folder structure — skip movie path setup
-      const isTVShow = opts?.mediaType === 'tvshow' && opts?.tvOptions
+      const isTVShow = opts?.mediaType === 'tvshow' && !!opts?.tvOptions
 
       // When isExtrasDisc is true, ALL tracks are extras — override any 'main' category
       // in trackMeta so nothing gets written to the main movie directory.
@@ -515,7 +599,7 @@ export class JobQueueService {
         libraryOutputDir = movieMain.outputDir
 
         // Skip main feature encode if trackMeta exists but has no 'main' category
-        skipMainEncode = hasTrackMeta && !hasMainTrack
+        skipMainEncode = !!(hasTrackMeta && !hasMainTrack)
 
         mkdirSync(movieRootDir, { recursive: true })
         if (!skipMainEncode) mkdirSync(libraryOutputDir, { recursive: true })
@@ -534,24 +618,28 @@ export class JobQueueService {
       }
 
       // ── Fetch TMDB metadata + artwork concurrently with rip ─────
-      let tmdbDetails: Awaited<ReturnType<TMDBService['getDetails']>> = null
+      // Held in an object (not a bare `let`) because TMDB details are only ever
+      // reassigned inside the async closure below — a `let` reassigned solely
+      // from within a nested closure doesn't get its declared type back when
+      // read from the outer scope (TS narrows it to `never` at those reads).
+      const tmdbState: { details: TMDBDetails | null } = { details: null }
       let posterLocalPath: string | undefined
       let fanartLocalPath: string | undefined
 
       const tmdbPromise = (async () => {
         if (!opts?.tmdbId) return
         try {
-          tmdbDetails = await this.tmdbService.getDetails(opts.tmdbId, opts.mediaType || 'movie')
-          log.info(`[media-lib] TMDB details fetched: "${tmdbDetails?.title}" (${tmdbDetails?.imdb_id || 'no IMDB'})`)
+          tmdbState.details = await this.tmdbService.getDetails(opts.tmdbId, opts.mediaType || 'movie')
+          log.info(`[media-lib] TMDB details fetched: "${tmdbState.details?.title}" (${tmdbState.details?.imdb_id || 'no IMDB'})`)
 
-          if (tmdbDetails?.poster_path) {
+          if (tmdbState.details?.poster_path) {
             const dest = join(tmpdir(), `ztr_poster_${opts.tmdbId}.jpg`)
-            const dl = await this.tmdbService.downloadArtwork(tmdbDetails.poster_path, dest)
+            const dl = await this.tmdbService.downloadArtwork(tmdbState.details.poster_path, dest)
             if (dl.success) posterLocalPath = dest
           }
-          if (tmdbDetails?.backdrop_path) {
+          if (tmdbState.details?.backdrop_path) {
             const dest = join(tmpdir(), `ztr_fanart_${opts.tmdbId}.jpg`)
-            const dl = await this.tmdbService.downloadArtwork(tmdbDetails.backdrop_path, dest)
+            const dl = await this.tmdbService.downloadArtwork(tmdbState.details.backdrop_path, dest)
             if (dl.success) fanartLocalPath = dest
           }
         } catch (err) {
@@ -565,7 +653,7 @@ export class JobQueueService {
       log.info(`[media-lib] Codec preset: ${preset}`)
 
       // ── Step 1: Extract from disc (or use ingest files) ─────────────
-      let extractResult: { success: boolean; outputFiles: string[]; error?: string; readErrors?: ReadError[] }
+      let extractResult: RipResult
 
       if (params.isIngest && params.ingestFiles && params.ingestFiles.length > 0) {
         // Ingest mode: skip disc extraction, use local files directly
@@ -576,14 +664,24 @@ export class JobQueueService {
         for (const ingestFile of params.ingestFiles) {
           const destPath = join(stagingDir, ingestFile.split('/').pop() || 'input.mkv')
           try {
-            copyFileSync(ingestFile, destPath)
+            copyFileSync(ingestFile, destPath, CLONE_IF_SUPPORTED)
           } catch (err) {
             log.warn(`[media-lib] Failed to copy ingest file: ${err}`)
           }
         }
 
         const stagedFiles = params.ingestFiles.map(f => join(stagingDir, f.split('/').pop() || 'input.mkv'))
-        extractResult = { success: true, outputFiles: stagedFiles.filter(f => existsSync(f)) }
+        const existingStagedFiles = stagedFiles.filter(f => existsSync(f))
+        extractResult = {
+          success: true,
+          outputFiles: existingStagedFiles,
+          // Local-ingest files have no real MakeMKV titleId — use their
+          // position in the (user-ordered) file list as a synthetic one, so
+          // TV-mode ingest jobs can still map episodes by titleId like the
+          // disc-based path, as long as the renderer assigns tv.episodes[].trackId
+          // using that same 0-based ordering for ingest jobs.
+          titleFiles: existingStagedFiles.map((filePath, i) => ({ titleId: i, filePath }))
+        }
 
         if (extractResult.outputFiles.length === 0) {
           throw new Error('No valid ingest files found')
@@ -630,12 +728,16 @@ export class JobQueueService {
               (!params.discInfo ? ' (discInfo unavailable, assuming DVD)' : ''))
             sendProgress(5, 'Step 1/3 — MakeMKV failed, trying ffmpeg fallback...')
 
-            // If discInfo is missing, build a minimal stub so FFmpeg ripper can detect the device
-            const fallbackDiscInfo = params.discInfo || {
+            // If discInfo is missing, build a minimal stub so FFmpeg ripper can detect the
+            // device. tracks stays empty on purpose — ripTitlesFromVOB detects that and
+            // discovers VTS structure directly from the filesystem instead of trying to
+            // map (nonexistent) tracks by id.
+            const fallbackDiscInfo: DiscInfo = params.discInfo || {
               discType: 'DVD' as const,
               tracks: [],
               title: 'Unknown',
-              discId: undefined,
+              discId: '',
+              fingerprint: `unknown::${discIndex}`,
               trackCount: 0,
               metadata: { devicePath: `/dev/rdisk${discIndex}` }
             }
@@ -671,7 +773,7 @@ export class JobQueueService {
       }
 
       // ── TV Show Pipeline Branch ─────────────────────────────────────
-      if (isTVShow) {
+      if (isTVShow && opts?.tvOptions) {
         const tv = opts.tvOptions
         const showYear = parseInt(tv.year || '') || movieYear
 
@@ -689,7 +791,7 @@ export class JobQueueService {
         // Build actors from custom or TMDB
         const tvActors = opts.customActors && opts.customActors.length > 0
           ? opts.customActors.map((name, i) => ({ name, role: '', order: i }))
-          : tmdbDetails?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number }, i: number) => ({
+          : tmdbState.details?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number }, i: number) => ({
               name: c.name, role: c.character || '', order: c.order ?? i
             }))
           || undefined
@@ -700,21 +802,35 @@ export class JobQueueService {
           showName: tv.showName,
           year: showYear,
           metadata: {
-            plot: opts.customPlot || tmdbDetails?.overview || undefined,
-            genres: tmdbDetails?.genres?.map(g => g.name),
+            plot: opts.customPlot || tmdbState.details?.overview || undefined,
+            genres: tmdbState.details?.genres?.map(g => g.name),
             tmdb_id: opts.tmdbId,
-            imdb_id: tmdbDetails?.imdb_id || undefined,
+            imdb_id: tmdbState.details?.imdb_id || undefined,
             actors: tvActors
           },
-          artwork: { poster: posterLocalPath, fanart: fanartLocalPath }
+          artwork: { poster: posterLocalPath, fanart: fanartLocalPath },
+          isPlexTarget: params.primaryLibraryType === 'plex_export'
         })
 
-        // Encode + export each episode
+        // Encode + export each episode. Look files up by their titleId
+        // (trackId) via the extractor's explicit titleId→file map rather
+        // than pairing outputFiles[ei] with tv.episodes[ei] by array
+        // position — outputFiles only contains titles that actually
+        // succeeded, so after any single failed/skipped title, positional
+        // pairing silently shifts every subsequent episode's file and
+        // number off by one.
+        const titleFileById = new Map((extractResult.titleFiles ?? []).map(t => [t.titleId, t.filePath]))
+        const episodesToEncode = tv.episodes.filter(ep => titleFileById.has(ep.trackId))
+        const skippedEpisodes = tv.episodes.filter(ep => !titleFileById.has(ep.trackId))
+        if (skippedEpisodes.length > 0) {
+          log.warn(`[media-lib] Skipping ${skippedEpisodes.length} episode(s) whose title failed to extract: ` +
+            skippedEpisodes.map(ep => `S${tv.season}E${ep.episodeNumber} (title ${ep.trackId})`).join(', '))
+        }
+
         const allEpisodeFiles: string[] = []
-        for (let ei = 0; ei < extractResult.outputFiles.length; ei++) {
-          const stagingFile = extractResult.outputFiles[ei]
-          const epInfo = tv.episodes[ei]
-          if (!epInfo) continue
+        for (let ei = 0; ei < episodesToEncode.length; ei++) {
+          const epInfo = episodesToEncode[ei]
+          const stagingFile = titleFileById.get(epInfo.trackId)!
 
           const epCode = `S${String(tv.season).padStart(2, '0')}E${String(epInfo.episodeNumber).padStart(2, '0')}`
           const epTitle = epInfo.episodeTitle || `Episode ${epInfo.episodeNumber}`
@@ -722,7 +838,7 @@ export class JobQueueService {
           // Use showFolder (with year) in filename to match kodi-output.ts naming convention
           const baseName = `${showFolder} - ${epCode} - ${epTitle}`
 
-          log.info(`[media-lib] Encoding TV episode ${ei + 1}/${extractResult.outputFiles.length}: ${baseName}`)
+          log.info(`[media-lib] Encoding TV episode ${ei + 1}/${episodesToEncode.length}: ${baseName} (title ${epInfo.trackId})`)
 
           const seasonDir = join(primaryLibraryPath, 'TV Shows', showFolder, `Season ${String(tv.season).padStart(2, '0')}`)
           mkdirSync(seasonDir, { recursive: true })
@@ -734,21 +850,22 @@ export class JobQueueService {
             const epEncodeArgs = getEncodingArgs(preset, {
               mediaInfo: epMediaInfo,
               preserveInterlaced: params.preserveInterlaced,
-              convertSubsToSrt: params.convertSubsToSrt
+              convertSubsToSrt: params.convertSubsToSrt,
+              ffmpegPath: this.ffmpegService.getPath()
             })
 
-            const epPct = (ei / extractResult.outputFiles.length)
+            const epPct = (ei / episodesToEncode.length)
             sendProgress(50 + epPct * 40, `Step 2/3 — Encoding ${epCode}: ${epTitle}`)
 
             const epEncodeResult = await this.ffmpegService.encode({
-              jobId: `${jobId}_ep_${ei}`,
+              jobId: `${jobId}_ep_${epInfo.trackId}`,
               inputPath: stagingFile,
               outputPath: epStagingPath,
               args: epEncodeArgs,
               totalDuration: epMediaInfo.duration,
               window,
               onProgress: (pct) => {
-                sendProgress(50 + ((ei + pct / 100) / extractResult.outputFiles.length) * 40,
+                sendProgress(50 + ((ei + pct / 100) / episodesToEncode.length) * 40,
                   `Step 2/3 — Encoding ${epCode}: ${pct.toFixed(0)}%`)
               }
             })
@@ -787,14 +904,20 @@ export class JobQueueService {
 
         // Copy to additional libraries
         if (params.additionalLibraryPaths) {
-          for (const additionalPath of params.additionalLibraryPaths) {
+          for (let li = 0; li < params.additionalLibraryPaths.length; li++) {
+            const additionalPath = params.additionalLibraryPaths[li]
             try {
               this.kodiService.exportTVShow({
                 libraryPath: additionalPath,
                 showName: tv.showName,
                 year: showYear,
-                metadata: { plot: opts.customPlot || tmdbDetails?.overview || undefined, tmdb_id: opts.tmdbId },
-                artwork: { poster: posterLocalPath, fanart: fanartLocalPath }
+                metadata: {
+                  plot: opts.customPlot || tmdbState.details?.overview || undefined,
+                  tmdb_id: opts.tmdbId,
+                  imdb_id: tmdbState.details?.imdb_id || undefined
+                },
+                artwork: { poster: posterLocalPath, fanart: fanartLocalPath },
+                isPlexTarget: params.additionalLibraryTypes?.[li] === 'plex_export'
               })
               const showFolder = showYear ? `${tv.showName} (${showYear})` : tv.showName
               for (const epFile of allEpisodeFiles) {
@@ -803,7 +926,16 @@ export class JobQueueService {
                 const destDir = join(additionalPath, 'TV Shows', showFolder)
                 const destPath = join(destDir, relPath)
                 mkdirSync(dirname(destPath), { recursive: true })
-                copyFileSync(epFile, destPath)
+                copyFileSync(epFile, destPath, CLONE_IF_SUPPORTED)
+                // Previously only the primary library's copy was recorded —
+                // the app's own history/library view had no idea files also
+                // landed in the additional (Jellyfin/Plex/Kodi) targets.
+                outputFileQueries.createOutputFile({
+                  job_id: dbId,
+                  file_path: destPath,
+                  format: 'mkv',
+                  video_codec: preset === 'hevc' ? 'hevc' : 'h264'
+                })
               }
             } catch (err) {
               log.warn(`[media-lib] TV show additional library copy failed: ${err}`)
@@ -812,46 +944,30 @@ export class JobQueueService {
         }
 
         // Clean up and finish
-        try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}
+        try { rmSync(stagingDir, { recursive: true, force: true }) } catch {
+          // Staging dir already gone or locked — non-fatal, job succeeded regardless
+        }
 
         phase = 'done'
         sendProgress(100, 'Complete')
         jobQueries.updateJobStatus(dbId, 'completed')
         this.updateQueueItem(jobId, 'completed')
-        window.webContents.send(IPC.RIP_COMPLETE, { jobId, outputFiles: allEpisodeFiles })
+        safeSend(window, IPC.RIP_COMPLETE, { jobId, outputFiles: allEpisodeFiles })
         notifyJobComplete(`${tv.showName} S${String(tv.season).padStart(2, '0')}`, allEpisodeFiles[0]).catch(() => {})
         log.info(`[media-lib] TV pipeline complete — ${allEpisodeFiles.length} episode(s)`)
         return
       }
 
       // ── Build titleId → output file mapping ──────────────────────
-      // MakeMKV rips titles sequentially. Output files correspond to
-      // successful extractions in titleIds order. Build a reliable mapping
-      // so we can match trackMeta entries (by titleId) to files.
-      const titleFileMap = new Map<number, string>()
-      {
-        // MakeMKV names files as D{disc}_t{titleId}.mkv — parse titleId from filename
-        const parseTitleId = (filePath: string): number | null => {
-          const match = filePath.match(/[Dd]\d+_t(\d+)\.mkv$/)
-          return match ? parseInt(match[1], 10) : null
-        }
-
-        for (const file of extractResult.outputFiles) {
-          const parsed = parseTitleId(file)
-          if (parsed !== null) {
-            titleFileMap.set(parsed, file)
-          }
-        }
-
-        // Fallback: if parsing failed (unusual naming), use sequential mapping
-        if (titleFileMap.size === 0 && extractResult.outputFiles.length > 0) {
-          log.warn(`[media-lib] Could not parse titleIds from filenames — using sequential mapping`)
-          for (let i = 0; i < extractResult.outputFiles.length && i < titleIds.length; i++) {
-            titleFileMap.set(titleIds[i], extractResult.outputFiles[i])
-          }
-        }
-        log.info(`[media-lib] Title→file map: ${[...titleFileMap.entries()].map(([id, f]) => `t${id}→${f.split('/').pop()}`).join(', ')}`)
-      }
+      // Previously reconstructed by regex-parsing MakeMKV's own output
+      // filenames (D{disc}_t{titleId}.mkv) — which never matched the ffmpeg
+      // VOB fallback's different naming convention, silently falling back to
+      // pairing titleIds[i] with outputFiles[i] by position (wrong whenever
+      // any title failed/was skipped). extractResult.titleFiles is now
+      // populated directly by whichever extractor actually ran (MakeMKV,
+      // VOB fallback, or ingest), so it's correct by construction.
+      const titleFileMap = new Map((extractResult.titleFiles ?? []).map(t => [t.titleId, t.filePath]))
+      log.info(`[media-lib] Title→file map: ${[...titleFileMap.entries()].map(([id, f]) => `t${id}→${f.split('/').pop()}`).join(', ')}`)
 
       // ── Determine main feature vs extras from trackMeta ──────────
       const trackMetaList = trackMetaOverridden
@@ -905,7 +1021,8 @@ export class JobQueueService {
           const encodeArgs = getEncodingArgs(preset, {
             mediaInfo: completeMediaInfo,
             preserveInterlaced: params.preserveInterlaced,
-            convertSubsToSrt: params.convertSubsToSrt
+            convertSubsToSrt: params.convertSubsToSrt,
+            ffmpegPath: this.ffmpegService.getPath()
           })
           log.info(`[media-lib] FFmpeg args: ${encodeArgs.join(' ')}`)
 
@@ -1003,7 +1120,7 @@ export class JobQueueService {
           mkdirSync(extrasDir, { recursive: true })
 
           // Sanitize filename and renumber bonus tracks to continue sequence
-          let safeName = extraMeta.name.replace(/[<>:"/\\|?*\/]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
+          let safeName = extraMeta.name.replace(/[<>:"/\\|?*]/g, '_').trim() || `Bonus ${String(ei + 1).padStart(3, '0')}`
           const bonusMatch = safeName.match(bonusPattern)
           if (bonusMatch) {
             // This is a "Title - Bonus NNN" auto-generated name — renumber
@@ -1026,7 +1143,8 @@ export class JobQueueService {
             const extrasEncodeArgs = getEncodingArgs(preset, {
               mediaInfo: extrasMediaInfo,
               preserveInterlaced: params.preserveInterlaced,
-              convertSubsToSrt: params.convertSubsToSrt
+              convertSubsToSrt: params.convertSubsToSrt,
+              ffmpegPath: this.ffmpegService.getPath()
             })
 
             const extrasEncodeResult = await this.ffmpegService.encode({
@@ -1071,7 +1189,7 @@ export class JobQueueService {
       // Build actors from custom or TMDB
       const actorsForNfo = opts?.customActors && opts.customActors.length > 0
         ? opts.customActors.map((name, i) => ({ name, role: '', order: i }))
-        : tmdbDetails?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number; profile_path?: string }, i: number) => ({
+        : tmdbState.details?.credits?.cast?.slice(0, 20)?.map((c: { name: string; character: string; order: number; profile_path?: string | null }, i: number) => ({
             name: c.name,
             role: c.character || '',
             order: c.order ?? i,
@@ -1087,12 +1205,12 @@ export class JobQueueService {
         videoAlreadyAtPath: finalVideoPath,
         metadata: {
           tmdb_id: opts?.tmdbId,
-          imdb_id: tmdbDetails?.imdb_id || undefined,
-          plot: opts?.customPlot || tmdbDetails?.overview || undefined,
-          tagline: tmdbDetails?.tagline || undefined,
-          genres: tmdbDetails?.genres?.map(g => g.name),
-          runtime: tmdbDetails?.runtime || undefined,
-          voteAverage: tmdbDetails?.vote_average || undefined,
+          imdb_id: tmdbState.details?.imdb_id || undefined,
+          plot: opts?.customPlot || tmdbState.details?.overview || undefined,
+          tagline: tmdbState.details?.tagline || undefined,
+          genres: tmdbState.details?.genres?.map(g => g.name),
+          runtime: tmdbState.details?.runtime || undefined,
+          voteAverage: tmdbState.details?.vote_average || undefined,
           actors: actorsForNfo
         },
         artwork: {
@@ -1116,12 +1234,28 @@ export class JobQueueService {
       // ── Copy to additional libraries (Jellyfin + Plex + Kodi multi-output) ──
       if (params.additionalLibraryPaths && params.additionalLibraryPaths.length > 0) {
         sendProgress(95, `Step 3/3 — Copying to ${params.additionalLibraryPaths.length} additional librar${params.additionalLibraryPaths.length > 1 ? 'ies' : 'y'}...`)
-        for (const additionalPath of params.additionalLibraryPaths) {
+        for (let li = 0; li < params.additionalLibraryPaths.length; li++) {
+          const additionalPath = params.additionalLibraryPaths[li]
+          // Plex's automatic matcher is notoriously unreliable for
+          // ripped-disc titles (messy/generic source naming) — its own
+          // docs recommend embedding the TMDB/IMDb id directly in the
+          // folder+file name as an exact-match hint (verified format:
+          // "{tmdb-12345}"/"{imdb-tt0372784}"). Only applied here, to the
+          // additional-library copy: by this point in the pipeline TMDB
+          // has definitely resolved, whereas the PRIMARY library's video
+          // file was already written by ffmpeg earlier, before TMDB
+          // resolution — retagging its folder now would strand the NFO
+          // in a different folder than the video it describes.
+          const isPlexTarget = params.additionalLibraryTypes?.[li] === 'plex_export'
+          const plexIdTag = isPlexTarget
+            ? (opts?.tmdbId ? `{tmdb-${opts.tmdbId}}` : tmdbState.details?.imdb_id ? `{imdb-${tmdbState.details.imdb_id}}` : undefined)
+            : undefined
           try {
             const { outputDir: additionalMovieRoot } = this.kodiService.buildMoviePath({
               libraryPath: additionalPath,
               title: movieTitle,
-              year: movieYear
+              year: movieYear,
+              plexIdTag
             })
             mkdirSync(additionalMovieRoot, { recursive: true })
 
@@ -1136,18 +1270,29 @@ export class JobQueueService {
                   soundVersion: opts?.soundVersion,
                   discNumber: opts?.discNumber,
                   totalDiscs: opts?.totalDiscs,
-                  isExtrasDisc: useExtrasDiscMode
+                  isExtrasDisc: useExtrasDiscMode,
+                  plexIdTag
                 })
               // Deconflict extras disc path in additional library too
               const additionalVideoPath = useExtrasDiscMode
                 ? this.deconflictExtrasPath(additionalOutputDir, opts?.edition || 'Extras', new Set<string>())
                 : additionalVideoPathRaw
               mkdirSync(dirname(additionalVideoPath), { recursive: true })
-              copyFileSync(finalVideoPath, additionalVideoPath)
+              copyFileSync(finalVideoPath, additionalVideoPath, CLONE_IF_SUPPORTED)
               this.kodiService.finalizeMovie({
                 ...finalizeParams,
                 libraryPath: additionalPath,
-                videoAlreadyAtPath: additionalVideoPath
+                videoAlreadyAtPath: additionalVideoPath,
+                plexIdTag
+              })
+              // Previously only the primary library's copy was recorded —
+              // the app's own history/library view had no idea files also
+              // landed in the additional (Jellyfin/Plex/Kodi) targets.
+              outputFileQueries.createOutputFile({
+                job_id: dbId,
+                file_path: additionalVideoPath,
+                format: 'mkv',
+                video_codec: preset === 'hevc' ? 'hevc' : 'h264'
               })
             }
 
@@ -1156,7 +1301,12 @@ export class JobQueueService {
               const relPath = extrasFile.slice(movieRootDir.length)
               const destPath = join(additionalMovieRoot, relPath)
               mkdirSync(dirname(destPath), { recursive: true })
-              copyFileSync(extrasFile, destPath)
+              copyFileSync(extrasFile, destPath, CLONE_IF_SUPPORTED)
+              outputFileQueries.createOutputFile({
+                job_id: dbId,
+                file_path: destPath,
+                format: 'mkv'
+              })
             }
             log.info(`[media-lib] Additional library organized: ${additionalPath}`)
           } catch (err) {
@@ -1205,7 +1355,7 @@ export class JobQueueService {
       this.updateQueueItem(jobId, 'completed')
       const allOutputFiles = skipMainEncode ? extrasOutputFiles : [finalVideoPath, ...extrasOutputFiles]
       const readErrorSummary = this.buildReadErrorSummary(extractResult.readErrors)
-      window.webContents.send(IPC.RIP_COMPLETE, {
+      safeSend(window, IPC.RIP_COMPLETE, {
         jobId,
         outputFiles: allOutputFiles,
         readErrors: extractResult.readErrors,
@@ -1223,11 +1373,19 @@ export class JobQueueService {
       getDiscDetectionService().rippingInProgress = false
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
-      window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      safeSend(window, IPC.RIP_ERROR, { jobId, error: msg })
       notifyJobFailed(movieTitle, msg).catch(() => {})
 
       // Clean up staging on failure too
-      try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}
+      // TODO(Phase 3): this discards successfully-extracted footage when only the
+      // encode step failed — preserve staging (or move to a "failed" holding dir)
+      // and record its path in error_message so a failed encode can be retried
+      // without re-ripping the disc.
+      try {
+        rmSync(stagingDir, { recursive: true, force: true })
+      } catch {
+        // Staging dir already gone or locked — non-fatal
+      }
     }
   }
 
@@ -1249,16 +1407,23 @@ export class JobQueueService {
       if (result.success) {
         jobQueries.updateJobStatus(dbId, 'completed')
         this.updateQueueItem(jobId, 'completed')
-        window.webContents.send(IPC.RIP_COMPLETE, { jobId })
+        safeSend(window, IPC.RIP_COMPLETE, { jobId })
+        notifyJobComplete('Raw Disc Backup', outputDir).catch(() => {})
       } else {
         jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
         this.updateQueueItem(jobId, 'failed')
-        window.webContents.send(IPC.RIP_ERROR, { jobId, error: result.error })
+        safeSend(window, IPC.RIP_ERROR, { jobId, error: result.error })
+        notifyJobFailed('Raw Disc Backup', result.error).catch(() => {})
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
+      // Previously missing: a thrown exception here (as opposed to a
+      // result.success: false) reached the DB but never told the renderer,
+      // so the UI just sat there with no error shown to the user.
+      safeSend(window, IPC.RIP_ERROR, { jobId, error: msg })
+      notifyJobFailed('Raw Disc Backup', msg).catch(() => {})
     } finally {
       getDiscDetectionService().rippingInProgress = false
     }
@@ -1286,21 +1451,28 @@ export class JobQueueService {
       const args = getEncodingArgs(preset, {
         mediaInfo,
         preserveInterlaced,
-        convertSubsToSrt: params.convertSubsToSrt
+        convertSubsToSrt: params.convertSubsToSrt,
+        ffmpegPath: this.ffmpegService.getPath()
       })
 
-      const ext = preset === 'ffv1' ? 'mkv' : 'mkv'
+      const ext = 'mkv'
       const inputName = inputPath.split('/').pop()?.replace(/\.[^.]+$/, '') || 'output'
       const outputPath = `${outputDir}/${inputName}_${preset}.${ext}`
 
-      const result = await this.ffmpegService.encode({
+      // Standalone encodes (via createEncodeJob directly) can target a fresh
+      // default output dir (e.g. ~/Movies/Zac the Ripper/FFV1) that's never
+      // been created — without this, ffmpeg fails to open the output file on
+      // first use until the user manually creates the folder.
+      mkdirSync(outputDir, { recursive: true })
+
+      const result = await this.encodeSemaphore.run(() => this.ffmpegService.encode({
         jobId,
         inputPath,
         outputPath,
         args,
         totalDuration,
         window
-      })
+      }))
 
       if (result.success) {
         jobQueries.updateJobStatus(dbId, 'completed', { output_path: outputPath })
@@ -1313,17 +1485,20 @@ export class JobQueueService {
           video_codec: preset === 'ffv1' ? 'ffv1' : preset === 'hevc' ? 'hevc' : 'h264'
         })
 
-        window.webContents.send(IPC.ENCODE_COMPLETE, { jobId, outputPath })
+        safeSend(window, IPC.ENCODE_COMPLETE, { jobId, outputPath })
+        notifyJobComplete(`${inputName} (${preset})`, outputPath).catch(() => {})
       } else {
         jobQueries.updateJobStatus(dbId, 'failed', { error_message: result.error })
         this.updateQueueItem(jobId, 'failed')
-        window.webContents.send(IPC.ENCODE_ERROR, { jobId, error: result.error })
+        safeSend(window, IPC.ENCODE_ERROR, { jobId, error: result.error })
+        notifyJobFailed(`${inputName} (${preset})`, result.error).catch(() => {})
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
-      window.webContents.send(IPC.ENCODE_ERROR, { jobId, error: msg })
+      safeSend(window, IPC.ENCODE_ERROR, { jobId, error: msg })
+      notifyJobFailed(`Encode (${preset})`, msg).catch(() => {})
     }
   }
 
@@ -1335,11 +1510,14 @@ export class JobQueueService {
     year: string
     discNumber: number
     totalDiscs: number
-    tracks: Array<{ number: number; title: string; artist: string }>
+    tracks: Array<{ number: number; title: string; artist: string; recordingId?: string }>
     mbReleaseId: string | null
     isVariousArtists: boolean
     coverArtPath: string | null
     devicePath?: string
+    albumArtistId?: string | null
+    genre?: string | null
+    discId?: string | null
     window: BrowserWindow
   }): Promise<{ jobId: string; dbId: number }> {
     const { tracks, window } = params
@@ -1370,7 +1548,7 @@ export class JobQueueService {
 
     log.info(`[music] Created music_export job ${jobId} — ${params.artist} - ${params.album}`)
 
-    this.executeMusicPipeline(jobId, job.id, { ...params, outputDir })
+    this.runDetached(jobId, job.id, this.executeMusicPipeline(jobId, job.id, { ...params, outputDir }))
 
     return { jobId, dbId: job.id }
   }
@@ -1389,16 +1567,20 @@ export class JobQueueService {
     year: string
     discNumber: number
     totalDiscs: number
-    tracks: Array<{ number: number; title: string; artist: string }>
+    tracks: Array<{ number: number; title: string; artist: string; recordingId?: string }>
     mbReleaseId: string | null
     isVariousArtists: boolean
     coverArtPath: string | null
     devicePath?: string
+    albumArtistId?: string | null
+    genre?: string | null
+    discId?: string | null
     outputDir: string
     window: BrowserWindow
   }): Promise<void> {
     const { trackNumbers, artist, albumArtist, album, year, discNumber, totalDiscs,
-            tracks, mbReleaseId, coverArtPath, devicePath, outputDir, window } = params
+            tracks, mbReleaseId, isVariousArtists, coverArtPath, devicePath,
+            albumArtistId, genre, discId, outputDir, window } = params
 
     jobQueries.updateJobStatus(dbId, 'running')
     this.updateQueueItem(jobId, 'running')
@@ -1408,8 +1590,10 @@ export class JobQueueService {
     log.info(`[music] Staging dir: ${stagingDir}`)
 
     const sendProgress = (pct: number, message: string) => {
-      window.webContents.send(IPC.AUDIO_PROGRESS, { jobId, percentage: pct, message })
-      window.webContents.send(IPC.RIP_PROGRESS, { jobId, percentage: pct, message })
+      const item = this.queue.find(q => q.id === jobId)
+      if (item) { item.progress = pct; item.message = message }
+      safeSend(window, IPC.AUDIO_PROGRESS, { jobId, percentage: pct, message })
+      safeSend(window, IPC.RIP_PROGRESS, { jobId, percentage: pct, message })
     }
 
     try {
@@ -1449,8 +1633,11 @@ export class JobQueueService {
       if (!ripResult.success) {
         throw new Error(ripResult.error || 'CD ripping failed')
       }
+      if (ripResult.skippedTracks.length > 0) {
+        log.warn(`[music] Phase 1 — ${ripResult.skippedTracks.length} track(s) could not be ripped after retries: ${ripResult.skippedTracks.join(', ')}`)
+      }
 
-      log.info(`[music] Phase 1 complete — ${ripResult.outputFiles.length} WAV files`)
+      log.info(`[music] Phase 1 complete — ${ripResult.trackFiles.length} WAV files`)
 
       // ── Phase 2: Encode WAV to FLAC (50-90%) ───────────────────
       sendProgress(50, 'Phase 2/3 — Encoding to FLAC...')
@@ -1458,57 +1645,61 @@ export class JobQueueService {
 
       const compressionLevel = getSetting('audio.flac_compression') || '8'
       const embedCoverArt = getSetting('audio.embed_cover_art') !== 'false'
-      const flacFiles: string[] = []
+      const flacFiles: Array<{ trackNumber: number; path: string }> = []
       const ffmpegPath = this.ffmpegService.getPath()
       const totalTracks = tracks.length
       const execFileAsync = promisify(execFile)
+      const skippedTrackNumbers = new Set(ripResult.skippedTracks)
 
-      for (let i = 0; i < ripResult.outputFiles.length; i++) {
-        const wavPath = ripResult.outputFiles[i]
-        const trackInfo = tracks[i]
-        if (!trackInfo) continue
+      // Keyed by track NUMBER, not array position — a deselected/skipped
+      // track leaves a gap in ripResult.trackFiles, and pairing by index
+      // against the full `tracks` list would silently shift every
+      // subsequent track's title/artist/MBID onto the wrong file.
+      const trackInfoByNumber = new Map(tracks.map(t => [t.number, t]))
+
+      for (let i = 0; i < ripResult.trackFiles.length; i++) {
+        const { trackNumber, filePath: wavPath } = ripResult.trackFiles[i]
+        const trackInfo = trackInfoByNumber.get(trackNumber)
+        if (!trackInfo) {
+          log.warn(`[music] No metadata for ripped track ${trackNumber} — skipping FLAC encode`)
+          skippedTrackNumbers.add(trackNumber)
+          continue
+        }
 
         const flacPath = join(stagingDir, `${String(trackInfo.number).padStart(2, '0')}.flac`)
         const trackPct = (i / totalTracks)
         sendProgress(50 + trackPct * 40, `Phase 2/3 — Encoding FLAC ${i + 1}/${totalTracks}`)
 
-        // Build ffmpeg args for FLAC encoding with metadata
-        const args: string[] = ['-y']
-
-        // Input: WAV file
-        args.push('-i', wavPath)
-
-        // If embedding cover art
-        if (embedCoverArt && localCoverPath && existsSync(localCoverPath)) {
-          args.push('-i', localCoverPath)
-          args.push('-map', '0:a', '-map', '1:v')
-          args.push('-c:v', 'copy', '-disposition:v', 'attached_pic')
-        }
-
-        // FLAC codec
-        args.push('-c:a', 'flac')
-        args.push('-compression_level', compressionLevel)
-
-        // Metadata tags
-        args.push('-metadata', `title=${trackInfo.title}`)
-        args.push('-metadata', `artist=${trackInfo.artist}`)
-        args.push('-metadata', `album=${album}`)
-        args.push('-metadata', `albumartist=${albumArtist}`)
-        args.push('-metadata', `track=${trackInfo.number}/${totalTracks}`)
-        args.push('-metadata', `date=${year}`)
-        if (totalDiscs > 1) {
-          args.push('-metadata', `disc=${discNumber}/${totalDiscs}`)
-        }
-
-        args.push(flacPath)
+        const args = buildFlacEncodeArgs({
+          wavPath,
+          outputPath: flacPath,
+          coverArtPath: embedCoverArt && localCoverPath && existsSync(localCoverPath) ? localCoverPath : null,
+          compressionLevel,
+          trackTitle: trackInfo.title,
+          trackArtist: trackInfo.artist,
+          trackNumber: trackInfo.number,
+          totalTracks,
+          album,
+          albumArtist,
+          year,
+          discNumber,
+          totalDiscs,
+          mbReleaseId,
+          albumArtistId,
+          recordingId: trackInfo.recordingId,
+          discId,
+          genre,
+          isVariousArtists
+        })
 
         // Run ffmpeg directly (not via encode() which adds its own -i and output args)
         try {
           await execFileAsync(ffmpegPath, args, { timeout: 120000 })
-          flacFiles.push(flacPath)
+          flacFiles.push({ trackNumber: trackInfo.number, path: flacPath })
           log.info(`[music] FLAC encoded: track ${trackInfo.number} "${trackInfo.title}"`)
         } catch (err) {
           log.warn(`[music] FLAC encode failed for track ${trackInfo.number}: ${err}`)
+          skippedTrackNumbers.add(trackInfo.number)
         }
       }
 
@@ -1520,50 +1711,69 @@ export class JobQueueService {
       sendProgress(90, 'Phase 3/3 — Organizing files...')
 
       // Build Navidrome folder: Artist/Album (Year)/
-      const safeArtist = this.sanitizeFilename(albumArtist || artist)
-      const safeAlbum = this.sanitizeFilename(album)
+      const safeArtist = sanitizeMusicFilename(albumArtist || artist)
+      const safeAlbum = sanitizeMusicFilename(album)
       let albumFolder = year ? `${safeAlbum} (${year})` : safeAlbum
       if (totalDiscs > 1) {
         albumFolder += ` (Disc ${discNumber})`
       }
 
-      const finalDir = join(outputDir, safeArtist, albumFolder)
-      mkdirSync(finalDir, { recursive: true })
-      log.info(`[music] Output dir: ${finalDir}`)
+      const artistDir = join(outputDir, safeArtist)
+      const finalDir = join(artistDir, albumFolder)
+      mkdirSync(artistDir, { recursive: true })
 
-      // Move FLAC files with proper naming: "01 - Track Title.flac"
-      const finalOutputFiles: string[] = []
-      for (let i = 0; i < flacFiles.length; i++) {
-        const trackInfo = tracks[i]
-        if (!trackInfo) continue
+      // Assemble the complete album into a staging folder first, then swap
+      // it into place with one rename — Navidrome (or any other library
+      // scanner watching this tree) would otherwise see the album folder
+      // appear with 1 track and slowly fill in over the whole copy loop,
+      // and could import it as a truncated/wrong-track-count album.
+      const readyDir = join(artistDir, `.ztr-staging-${jobId.slice(0, 8)}`)
+      rmSync(readyDir, { recursive: true, force: true })
+      mkdirSync(readyDir, { recursive: true })
+      log.info(`[music] Staging final album at ${readyDir} before publishing to ${finalDir}`)
 
-        const safeTitle = this.sanitizeFilename(trackInfo.title)
-        const filename = `${String(trackInfo.number).padStart(2, '0')} - ${safeTitle}.flac`
-        const finalPath = join(finalDir, filename)
+      // Copy FLAC files with proper naming: "01 - Track Title.flac"
+      const stagedOutputFiles: string[] = []
+      for (const { trackNumber, path: flacPath } of flacFiles) {
+        const trackInfo = trackInfoByNumber.get(trackNumber)
+        const safeTitle = sanitizeMusicFilename(trackInfo?.title || `Track ${trackNumber}`)
+        const filename = `${String(trackNumber).padStart(2, '0')} - ${safeTitle}.flac`
+        const readyPath = join(readyDir, filename)
 
         try {
-          copyFileSync(flacFiles[i], finalPath)
-          finalOutputFiles.push(finalPath)
+          copyFileSync(flacPath, readyPath)
+          stagedOutputFiles.push(filename)
         } catch (err) {
-          log.warn(`[music] Failed to copy ${flacFiles[i]} → ${finalPath}: ${err}`)
+          log.warn(`[music] Failed to stage ${flacPath} → ${readyPath}: ${err}`)
+          skippedTrackNumbers.add(trackNumber)
         }
       }
 
       // Copy cover art as folder.jpg
       if (localCoverPath && existsSync(localCoverPath)) {
         try {
-          copyFileSync(localCoverPath, join(finalDir, 'folder.jpg'))
-          log.info(`[music] Cover art copied: folder.jpg`)
+          copyFileSync(localCoverPath, join(readyDir, 'folder.jpg'))
+          log.info(`[music] Cover art staged: folder.jpg`)
         } catch (err) {
           log.warn(`[music] Cover art copy failed: ${err}`)
         }
       }
 
+      // Publish atomically: replace any prior folder for this album in one
+      // rename instead of file-by-file overwriting into a live directory.
+      rmSync(finalDir, { recursive: true, force: true })
+      renameSync(readyDir, finalDir)
+      log.info(`[music] Published album to ${finalDir}`)
+
+      const finalOutputFiles = stagedOutputFiles.map(filename => join(finalDir, filename))
+
       // Clean up staging
       try {
         rmSync(stagingDir, { recursive: true, force: true })
         log.info(`[music] Staging dir cleaned up`)
-      } catch {}
+      } catch {
+        // Staging dir already gone or locked — non-fatal, job succeeded regardless
+      }
 
       // Record output files
       for (const filePath of finalOutputFiles) {
@@ -1581,14 +1791,20 @@ export class JobQueueService {
       this.updateQueueItem(jobId, 'completed')
 
       const displayTitle = `${artist} - ${album}`
-      window.webContents.send(IPC.AUDIO_COMPLETE, {
+      const skippedList = Array.from(skippedTrackNumbers).sort((a, b) => a - b)
+      if (skippedList.length > 0) {
+        log.warn(`[music] Pipeline completed with ${skippedList.length} skipped track(s): ${skippedList.join(', ')}`)
+      }
+      safeSend(window, IPC.AUDIO_COMPLETE, {
         jobId,
         outputFiles: finalOutputFiles,
-        outputDir: finalDir
+        outputDir: finalDir,
+        skippedTracks: skippedList
       })
-      window.webContents.send(IPC.RIP_COMPLETE, {
+      safeSend(window, IPC.RIP_COMPLETE, {
         jobId,
-        outputFiles: finalOutputFiles
+        outputFiles: finalOutputFiles,
+        skippedTracks: skippedList
       })
       notifyJobComplete(displayTitle, finalDir).catch(() => {})
 
@@ -1599,16 +1815,16 @@ export class JobQueueService {
       getDiscDetectionService().rippingInProgress = false
       jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
       this.updateQueueItem(jobId, 'failed')
-      window.webContents.send(IPC.AUDIO_ERROR, { jobId, error: msg })
-      window.webContents.send(IPC.RIP_ERROR, { jobId, error: msg })
+      safeSend(window, IPC.AUDIO_ERROR, { jobId, error: msg })
+      safeSend(window, IPC.RIP_ERROR, { jobId, error: msg })
       notifyJobFailed(`${params.artist} - ${params.album}`, msg).catch(() => {})
 
-      try { rmSync(stagingDir, { recursive: true, force: true }) } catch {}
+      try {
+        rmSync(stagingDir, { recursive: true, force: true })
+      } catch {
+        // Staging dir already gone or locked — non-fatal
+      }
     }
-  }
-
-  private sanitizeFilename(name: string): string {
-    return name.replace(/[<>:"/\\|?*]/g, '_').replace(/\.+$/, '').trim() || 'Unknown'
   }
 
   cancelJob(jobId: string): boolean {
@@ -1616,9 +1832,16 @@ export class JobQueueService {
     if (!item) return false
 
     if (item.status === 'running') {
+      // Cooperative flag: pipeline methods check this between phases (rip →
+      // encode → organize) and stop early instead of running to completion.
+      item.cancelRequested = true
       this.ffmpegService.cancelJob(jobId)
       this.ffmpegRipperService.cancelJob(jobId)
       this.cdRipperService.cancelJob(jobId)
+      // MakeMKV extraction is the longest phase and previously had no cancel
+      // path at all — the drive would keep ripping until MakeMKV finished on
+      // its own regardless of what the UI/DB said.
+      item.makemkvService?.cancelJob(jobId)
       jobQueries.updateJobStatus(item.dbId, 'cancelled')
       this.updateQueueItem(jobId, 'cancelled')
     } else if (item.status === 'pending') {
@@ -1629,8 +1852,41 @@ export class JobQueueService {
     return true
   }
 
+  /** Cooperative-cancellation check for pipeline methods to poll between phases. */
+  private isCancelled(jobId: string): boolean {
+    return this.queue.find(q => q.id === jobId)?.cancelRequested === true
+  }
+
+  /**
+   * Kill every child process this queue knows about, across every job. Used
+   * on app quit — without this, closing the app mid-rip orphaned
+   * makemkvcon/ffmpeg/cdparanoia processes that kept running (and holding
+   * the optical drive) with no owner left to stop them.
+   */
+  killAllActiveProcesses(): void {
+    this.ffmpegService.killAll()
+    this.ffmpegRipperService.killAll()
+    this.cdRipperService.killAll()
+    const seen = new Set<MakeMKVService>()
+    for (const item of this.queue) {
+      if (item.makemkvService && !seen.has(item.makemkvService)) {
+        seen.add(item.makemkvService)
+        item.makemkvService.killAll()
+      }
+    }
+  }
+
   getActiveJobs(): QueuedJob[] {
     return this.queue.filter(j => j.status === 'running' || j.status === 'pending')
+  }
+
+  /** All in-memory jobs, active and recently-terminal (bounded — see updateQueueItem). */
+  getAllJobs(): QueuedJob[] {
+    return this.queue
+  }
+
+  getJobStatus(jobId: string): QueuedJob | undefined {
+    return this.queue.find(q => q.id === jobId)
   }
 
   private buildReadErrorSummary(readErrors?: ReadError[]): string | null {
@@ -1645,9 +1901,66 @@ export class JobQueueService {
     return `${readErrors.length} read error(s) — ${lines}`
   }
 
+  /**
+   * Job execution methods are fired-and-forgotten (not awaited) so job
+   * creation can return immediately. Each has its own internal try/catch,
+   * but statements before that try block starts (e.g. the initial
+   * updateJobStatus(dbId, 'running') call) can still throw — without this
+   * wrapper that becomes an unhandled promise rejection and the job is stuck
+   * 'pending'/'running' in the DB and UI forever.
+   */
+  private runDetached(jobId: string, dbId: number, promise: Promise<unknown>): void {
+    promise.catch(err => {
+      const msg = err instanceof Error ? err.message : String(err)
+      log.error(`[job-queue] Unhandled error in job ${jobId}: ${msg}`)
+      try {
+        jobQueries.updateJobStatus(dbId, 'failed', { error_message: msg })
+        this.updateQueueItem(jobId, 'failed')
+      } catch (dbErr) {
+        log.error(`[job-queue] Failed to record job ${jobId} failure: ${dbErr}`)
+      }
+    })
+  }
+
+  private static readonly MAX_TERMINAL_JOBS_IN_MEMORY = 100
+
   private updateQueueItem(jobId: string, status: QueuedJob['status']): void {
     const item = this.queue.find(q => q.id === jobId)
     if (item) item.status = status
+
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      this.pruneTerminalJobs()
+    }
+
+    // Refresh status.json immediately on a state transition rather than
+    // waiting for the next 5s heartbeat — a supervising session watching a
+    // job finish shouldn't see a stale "running" for up to 5 extra seconds.
+    this.writeStatusSnapshotNow()
+  }
+
+  private writeStatusSnapshotNow(): void {
+    writeStatusSnapshot(
+      this.getActiveJobs().map(j => ({
+        jobId: j.id, dbId: j.dbId, type: j.type, status: j.status,
+        progress: j.progress, message: j.message
+      })),
+      app.getVersion()
+    )
+  }
+
+  /**
+   * The DB is the durable record of job history — this in-memory queue only
+   * needs to keep enough recent terminal jobs around for the UI's immediate
+   * post-completion status checks. Without this, a multi-hundred-disc session
+   * grows this.queue forever.
+   */
+  private pruneTerminalJobs(): void {
+    const terminal = this.queue.filter(j => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled')
+    const excess = terminal.length - JobQueueService.MAX_TERMINAL_JOBS_IN_MEMORY
+    if (excess <= 0) return
+
+    const toDrop = new Set(terminal.slice(0, excess).map(j => j.id))
+    this.queue = this.queue.filter(j => !toDrop.has(j.id))
   }
 
   /**

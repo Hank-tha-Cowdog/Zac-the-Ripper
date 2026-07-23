@@ -55,11 +55,17 @@ export function registerDiscHandlers(): void {
       if (parsed.discId && Array.isArray(parsed.tracks) && parsed.tracks.length > 0) {
         // Attach cached TMDB result if available
         if (tmdbCache) {
-          try { parsed._tmdbCache = JSON.parse(tmdbCache) } catch {}
+          try {
+            parsed._tmdbCache = JSON.parse(tmdbCache)
+          } catch {
+            // Cached TMDB blob is corrupt — ignore, disc metadata is still usable without it
+          }
         }
         return parsed
       }
-    } catch {}
+    } catch {
+      // Cached disc metadata is corrupt — treat as a cache miss
+    }
     return null
   })
 
@@ -81,8 +87,28 @@ export function registerDiscHandlers(): void {
       const drive = drives.find(d => d.index === driveIndex)
 
       if (process.platform === 'darwin') {
-        // macOS: drutil eject works for any optical drive
-        await execFileAsync('drutil', ['eject'])
+        // macOS: bare `drutil eject` targets whatever drive drutil
+        // defaults to (verified against the real binary's own help text:
+        // "Usage: drutil -drive [drive-arguments] command" — drive
+        // targeting is an explicit, separate argument, not inferred). On
+        // a single-drive Mac that's harmless, but on a multi-drive rig —
+        // exactly the kind of setup this app's batch-mode workflow is
+        // for — "eject drive 2" could silently eject drive 1 instead.
+        //
+        // `-drive <name>` (vendor/product string) looked like the
+        // obviously-correct match against this app's DriveInfo.name, but
+        // testing it directly against a real drive failed ("Could not
+        // find a valid device") — the app's regex-captured vendor string
+        // apparently doesn't round-trip into drutil's own name matcher
+        // verbatim. `-drive <1-based-index>` was verified to work
+        // end-to-end against the real drive on this machine (both
+        // `status` and `eject`). This app's own driveIndex is 0-based
+        // (MakeMKV's DRV: line numbering), so +1 converts it — verified
+        // correct for a single drive; the index *mapping* itself (does
+        // drutil's own candidate ordering agree with MakeMKV's?) could
+        // not be verified further since this machine only has one drive.
+        const args = drive ? ['-drive', String(driveIndex + 1), 'eject'] : ['eject']
+        await execFileAsync('drutil', args)
         return { success: true }
       } else if (process.platform === 'linux') {
         // Linux: eject command with device path

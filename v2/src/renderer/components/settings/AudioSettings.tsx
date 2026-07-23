@@ -83,6 +83,21 @@ export function AudioSettings({ settings, onSave }: AudioSettingsProps) {
           </select>
         </div>
 
+        <div>
+          <LabelWithTooltip
+            label="Drive Read Offset (samples)"
+            tooltip="Sample-accurate read offset correction for your specific CD drive model, in PCM samples (e.g. 667, or -48). Passed to cdparanoia as -O/--sample-offset. Look up your drive at accuraterip.com/driveoffsets.htm. Leave blank to disable (raw drive output, no correction)."
+            className="label-tech"
+          />
+          <input
+            className="input w-full mt-1"
+            value={settings['audio.drive_read_offset'] || ''}
+            onChange={(e) => onSave('audio.drive_read_offset', e.target.value)}
+            placeholder="e.g. 667 (leave blank for no correction)"
+            inputMode="numeric"
+          />
+        </div>
+
         <p className="text-[10px] text-zinc-600 font-mono leading-relaxed">
           Audio CDs are ripped to FLAC (lossless) via cdparanoia. Navidrome handles on-the-fly transcoding for remote streaming.
         </p>

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { DEFAULT_SETTINGS } from '../../shared/constants'
 
 let db: Database.Database | null = null
@@ -42,16 +42,11 @@ function runMigrations(): void {
     )
   `)
 
-  // Read and run migration files
-  const migrationsDir = join(__dirname, '../main/database/migrations')
-
-  // In development, migrations are in source; in production, bundled
-  // Use inline migrations for reliability
   const migrations = getInlineMigrations()
 
   const applied = new Set(
-    database.prepare('SELECT name FROM _migrations').all()
-      .map((row: { name: string }) => row.name)
+    (database.prepare('SELECT name FROM _migrations').all() as { name: string }[])
+      .map((row) => row.name)
   )
 
   const insertMigration = database.prepare('INSERT INTO _migrations (name) VALUES (?)')
@@ -62,8 +57,13 @@ function runMigrations(): void {
 
   for (const migration of migrations) {
     if (!applied.has(migration.name)) {
-      database.exec(migration.sql)
-      insertMigration.run(migration.name)
+      // Each migration is atomic: a crash mid-migration leaves neither the
+      // schema change nor its _migrations record, so it retries cleanly.
+      const applyMigration = database.transaction(() => {
+        database.exec(migration.sql)
+        insertMigration.run(migration.name)
+      })
+      applyMigration()
       console.log(`Applied migration: ${migration.name}`)
     }
   }
@@ -417,6 +417,25 @@ function getInlineMigrations(): Array<{ name: string; sql: string }> {
       name: '021_add_poster_url_to_jobs',
       sql: `
         ALTER TABLE jobs ADD COLUMN poster_url TEXT DEFAULT NULL;
+      `
+    },
+    {
+      // Migration 015 seeded general.mode_plex_export with category 'plex';
+      // DEFAULT_SETTINGS declares it 'general', so getSettingsByCategory('general')
+      // was silently missing it on any DB that had already run migration 015.
+      name: '022_fix_mode_plex_export_category',
+      sql: `
+        UPDATE settings SET category = 'general' WHERE key = 'general.mode_plex_export';
+      `
+    },
+    {
+      // created_at/completed_at are queried by list/history views with no
+      // supporting index; tables grow monotonically over an archival session.
+      name: '023_add_history_indexes',
+      sql: `
+        CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
+        CREATE INDEX IF NOT EXISTS idx_discs_created_at ON discs(created_at);
       `
     }
   ]

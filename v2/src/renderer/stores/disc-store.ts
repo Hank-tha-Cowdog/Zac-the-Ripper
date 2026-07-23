@@ -59,6 +59,8 @@ export interface MusicTrackMeta {
   number: number
   title: string
   artist: string
+  /** MusicBrainz recording MBID — tagged as MUSICBRAINZ_TRACKID. Empty if unavailable (manual entry, no MB match). */
+  recordingId?: string
 }
 
 export interface DiscSessionState {
@@ -88,7 +90,12 @@ export interface DiscSessionState {
   musicTracks: MusicTrackMeta[]
   musicMbReleaseId: string | null
   musicIsVariousArtists: boolean
+  /** Local file path — set only when the user manually overrides the cover via file picker. Takes priority over musicCoverArtUrl at rip time. */
   musicCoverArtPath: string | null
+  /** Remote Cover Art Archive URL for the renderer preview only — never passed to the rip pipeline directly. */
+  musicCoverArtUrl: string | null
+  musicAlbumArtistId: string | null
+  musicGenre: string | null
 }
 
 const DEFAULT_DISC_SESSION: DiscSessionState = {
@@ -114,7 +121,10 @@ const DEFAULT_DISC_SESSION: DiscSessionState = {
   musicTracks: [],
   musicMbReleaseId: null,
   musicIsVariousArtists: false,
-  musicCoverArtPath: null
+  musicCoverArtPath: null,
+  musicCoverArtUrl: null,
+  musicAlbumArtistId: null,
+  musicGenre: null
 }
 
 interface DiscState {
@@ -175,12 +185,19 @@ export const useDiscStore = create<DiscState>((set, get) => ({
 
     set({ discInfo: info })
 
-    // Auto-select the main feature (longest track) instead of all tracks
+    // Auto-select the main feature (longest track) instead of all tracks.
+    // The `else` clearing to [] on eject/no-disc is not just tidiness —
+    // without it, a stale track-ID selection from the previous disc
+    // remains "selected" (and RIP! stays clickable) until the next disc
+    // happens to be rescanned, risking a rip submitted with the wrong
+    // disc's track IDs.
     if (info && info.tracks.length > 0) {
       const longest = info.tracks.reduce((a, b) =>
         a.durationSeconds > b.durationSeconds ? a : b
       )
       set({ selectedTracks: [longest.id] })
+    } else {
+      set({ selectedTracks: [] })
     }
 
     // Reset TMDB + disc session when disc changes — but preserve if session is bound to this disc

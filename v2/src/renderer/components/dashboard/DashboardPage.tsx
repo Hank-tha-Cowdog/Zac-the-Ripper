@@ -26,6 +26,16 @@ export function DashboardPage() {
 
   const handleEject = async (driveIndex: number) => {
     await window.ztr.disc.eject(driveIndex)
+    // If the ejected drive is the one whose disc is currently loaded,
+    // clear it immediately — otherwise discInfo/selectedTracks keep
+    // showing the just-ejected disc until the next poll happens to
+    // rescan, and RIP! would stay clickable against stale track IDs.
+    // (Ejecting a *different* drive than the loaded one, in a multi-drive
+    // setup, should leave the loaded disc's state untouched.)
+    if (driveIndex === selectedDrive) {
+      useDiscStore.getState().setDiscInfo(null)
+      useDiscStore.getState().resetDiscSession()
+    }
     // Re-scan drives to update the UI (disc will be gone)
     scan()
   }

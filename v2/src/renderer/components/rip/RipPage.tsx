@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Disc3 } from 'lucide-react'
 import { DiscInfoCard } from './DiscInfoCard'
@@ -19,12 +19,57 @@ export function RipPage() {
     discInfo, selectedTracks, selectedDrive, setTmdbResult, updateDiscSession,
     discSession, trackCategories, trackNames, tmdbResult
   } = useDiscStore()
-  const { addJob } = useJobsStore()
+  const { addJob, recentJobs } = useJobsStore()
   const [isRipping, setIsRipping] = useState(false)
   const [standbyMessage, setStandbyMessage] = useState<string | null>(null)
   const [musicOutputPath, setMusicOutputPath] = useState('')
 
   const isAudioCD = discInfo?.discType === 'AUDIO_CD'
+
+  // Manual rescan only — global disc detection in App.tsx handles polling + auto-load
+  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
+
+  const {
+    modes, setModes,
+    preserveInterlaced, setPreserveInterlaced,
+    convertSubsToSrt, setConvertSubsToSrt,
+    outputPaths, setOutputPath,
+    kodiMediaType, setKodiMediaType,
+    kodiTitle, setKodiTitle,
+    kodiYear, setKodiYear,
+    kodiTmdbId, setKodiTmdbId,
+    kodiEdition, setKodiEdition,
+    kodiCustomEdition, setKodiCustomEdition,
+    kodiIsExtrasDisc, setKodiIsExtrasDisc,
+    kodiSetName, setKodiSetName,
+    kodiSetOverview, setKodiSetOverview,
+    soundVersion, setSoundVersion,
+    customSoundVersion, setCustomSoundVersion,
+    discNumber, setDiscNumber,
+    totalDiscs, setTotalDiscs,
+    tvSeason, setTvSeason,
+    tvStartEpisode, setTvStartEpisode,
+    localIngestMode, setLocalIngestMode,
+    libraryTitle, libraryYear, libraryTmdbId, librarySetName, librarySetOverview, libraryPosterPath,
+    saveLibraryContext, clearLibraryContext,
+    persistedCollectionName,
+    batchModeEnabled, setBatchModeEnabled
+  } = useRipSettings()
+
+  // ── Batch/auto-rip mode ──────────────────────────────────────
+  // Off by default. When on: a newly-detected, fully-selectable disc gets
+  // a cancelable countdown before auto-starting (using whatever config is
+  // currently set, same as a manual RIP! click), and completion
+  // auto-ejects so the next disc can go in. Deliberately conservative:
+  // visible + cancelable rather than instant/silent, since this starts
+  // hours-long jobs and physically ejects media unattended.
+  const [autoRipCountdown, setAutoRipCountdown] = useState<number | null>(null)
+  // Fingerprint of the disc a countdown was already offered for — set the
+  // moment the countdown starts (not when the rip actually fires), so
+  // cancelling means "skip auto-rip for this disc," not "retry in a loop."
+  const autoRipOfferedForRef = useRef<string | null>(null)
+  const autoEjectJobIdRef = useRef<string | null>(null)
+  const AUTO_RIP_COUNTDOWN_SECONDS = 5
 
   // Load music output path from settings
   useEffect(() => {
@@ -57,38 +102,15 @@ export function RipPage() {
     window.ztr.settings.set('paths.music_output', path)
   }
 
-  // Manual rescan only — global disc detection in App.tsx handles polling + auto-load
-  const { rescanDisc } = useDiscDetection({ pollInterval: 0, autoLoadDiscInfo: false })
-
-  const {
-    modes, setModes,
-    preserveInterlaced, setPreserveInterlaced,
-    convertSubsToSrt, setConvertSubsToSrt,
-    outputPaths, setOutputPath,
-    kodiMediaType, setKodiMediaType,
-    kodiTitle, setKodiTitle,
-    kodiYear, setKodiYear,
-    kodiTmdbId, setKodiTmdbId,
-    kodiEdition, setKodiEdition,
-    kodiCustomEdition, setKodiCustomEdition,
-    kodiIsExtrasDisc, setKodiIsExtrasDisc,
-    kodiSetName, setKodiSetName,
-    kodiSetOverview, setKodiSetOverview,
-    soundVersion, setSoundVersion,
-    customSoundVersion, setCustomSoundVersion,
-    discNumber, setDiscNumber,
-    totalDiscs, setTotalDiscs,
-    tvSeason, setTvSeason,
-    tvStartEpisode, setTvStartEpisode,
-    localIngestMode, setLocalIngestMode,
-    libraryTitle, libraryYear, libraryTmdbId, librarySetName, librarySetOverview, libraryPosterPath,
-    saveLibraryContext, clearLibraryContext,
-    persistedCollectionName
-  } = useRipSettings()
-
   const handleEject = async () => {
     if (selectedDrive === null) return
     await window.ztr.disc.eject(selectedDrive)
+    // Without this, discInfo/selectedTracks/discSession kept showing the
+    // just-ejected disc until the next poll happened to rescan — during
+    // that window RIP! was still clickable and would submit the old
+    // disc's track selection against whatever's now in the drive.
+    useDiscStore.getState().setDiscInfo(null)
+    useDiscStore.getState().resetDiscSession()
     navigate('/')
   }
 
@@ -200,7 +222,8 @@ export function RipPage() {
 
     const { musicArtist, musicAlbumArtist, musicAlbum, musicYear,
             musicDiscNumber, musicTotalDiscs, musicTracks,
-            musicMbReleaseId, musicIsVariousArtists, musicCoverArtPath } = discSession
+            musicMbReleaseId, musicIsVariousArtists, musicCoverArtPath,
+            musicAlbumArtistId, musicGenre } = discSession
 
     // Map selected track IDs (0-based) back to 1-based track numbers
     const trackNumbers = selectedTracks.map(id => id + 1)
@@ -208,7 +231,7 @@ export function RipPage() {
     // Filter music tracks to only selected ones, preserving order
     const selectedMusicTracks = trackNumbers.map(num => {
       const mt = musicTracks.find(t => t.number === num)
-      return mt || { number: num, title: `Track ${num}`, artist: musicArtist }
+      return mt || { number: num, title: `Track ${num}`, artist: musicArtist, recordingId: '' }
     })
 
     try {
@@ -224,7 +247,10 @@ export function RipPage() {
         mbReleaseId: musicMbReleaseId,
         isVariousArtists: musicIsVariousArtists,
         coverArtPath: musicCoverArtPath,
-        devicePath: discInfo?.metadata?.devicePath
+        devicePath: discInfo?.metadata?.devicePath,
+        albumArtistId: musicAlbumArtistId,
+        genre: musicGenre,
+        discId: discInfo?.metadata?.musicbrainzDiscId || null
       })
 
       if (result?.jobId) {
@@ -237,12 +263,24 @@ export function RipPage() {
           message: 'Preparing audio rip...',
           movieTitle: `${musicArtist || 'Unknown'} - ${musicAlbum || 'Unknown'}`
         })
+        if (batchModeEnabled) autoEjectJobIdRef.current = result.jobId
         setTimeout(() => navigate('/progress'), 1500)
+      } else {
+        // See handleRip — an IPC handler resolving with { error } instead
+        // of throwing left the UI permanently stuck on "Standby..." with
+        // no reset and no feedback.
+        const message = (result as { error?: string } | undefined)?.error || 'Audio rip failed to start'
+        console.error('Audio rip failed to start:', message)
+        setStandbyMessage(`Error: ${message}`)
+        setIsRipping(false)
+        setTimeout(() => setStandbyMessage(null), 5000)
       }
     } catch (err) {
       console.error('Audio rip failed:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      setStandbyMessage(`Error: ${message}`)
       setIsRipping(false)
-      setStandbyMessage(null)
+      setTimeout(() => setStandbyMessage(null), 5000)
     }
   }
 
@@ -335,6 +373,7 @@ export function RipPage() {
         isIngest,
         ingestFiles: isIngest ? discSession.ingestFiles : undefined,
         posterUrl,
+        expectedDiscId: isIngest ? undefined : discInfo?.discId,
         kodiOptions: isLibraryMode ? {
           mediaType: kodiMediaType,
           title: kodiTitle,
@@ -362,7 +401,13 @@ export function RipPage() {
         addJob({
           jobId: result.jobId,
           dbId: result.dbId,
-          type: enabledModes[0] || 'mkv_rip',
+          // The backend decides the actual primary job type (e.g. by which
+          // library has a configured path, for combined export modes) —
+          // enabledModes[0] is just "whichever checkbox comes first in a
+          // fixed declaration order" and disagreed with it whenever modes
+          // were combined (e.g. ffv1_archival + kodi_export), mislabeling
+          // the whole pipeline's badge/messages.
+          type: (result as { type?: string }).type || enabledModes[0] || 'mkv_rip',
           status: 'running',
           percentage: 0,
           message: isIngest ? 'Processing local files...' : 'Disc drive spinning up...',
@@ -375,17 +420,81 @@ export function RipPage() {
           totalDiscs: parseInt(totalDiscs) || undefined,
           posterUrl
         })
+        if (batchModeEnabled) autoEjectJobIdRef.current = result.jobId
         setTimeout(() => navigate('/progress'), 1500)
+      } else {
+        // IPC handlers here can resolve with { error } instead of throwing
+        // (e.g. "No window found", or nothing selected) — without this
+        // branch the UI stayed stuck showing "Standby — preparing to rip"
+        // forever, since only the catch{} block below ever reset it.
+        const message = (result as { error?: string } | undefined)?.error || 'Rip failed to start'
+        console.error('Rip failed to start:', message)
+        setStandbyMessage(`Error: ${message}`)
+        setIsRipping(false)
+        setTimeout(() => setStandbyMessage(null), 5000)
       }
     } catch (err) {
       console.error('Rip failed:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      setStandbyMessage(`Error: ${message}`)
       setIsRipping(false)
-      setStandbyMessage(null)
+      setTimeout(() => setStandbyMessage(null), 5000)
     }
   }
 
   const enabledModesForButton = Object.entries(modes).filter(([, v]) => v).map(([k]) => k)
   const canRip = selectedTracks.length > 0 && enabledModesForButton.length > 0 && !isRipping
+
+  // Offer a countdown the first time a newly-detected disc becomes
+  // selectable. Guarded by the ref (not just fingerprint in the dep
+  // array) so cancelling doesn't re-offer on the next unrelated re-render
+  // — cancelling means "I'll handle this disc myself."
+  useEffect(() => {
+    if (!batchModeEnabled) return
+    if (!discInfo?.fingerprint) return
+    if (!canRip) return
+    if (autoRipOfferedForRef.current === discInfo.fingerprint) return
+
+    autoRipOfferedForRef.current = discInfo.fingerprint
+    setAutoRipCountdown(AUTO_RIP_COUNTDOWN_SECONDS)
+  }, [batchModeEnabled, discInfo?.fingerprint, canRip])
+
+  // Tick the countdown down; fire the rip at zero. handleRip() itself
+  // already delegates to handleAudioRip() for audio CDs (see its own body
+  // below) — same single entry point the manual RIP! button uses. Both
+  // branches defer through setTimeout (even the "fire now" one, at 0ms)
+  // rather than calling setState synchronously in the effect body, which
+  // would otherwise trigger a cascading render within the same commit.
+  useEffect(() => {
+    if (autoRipCountdown === null) return
+    if (autoRipCountdown <= 0) {
+      const timer = setTimeout(() => {
+        setAutoRipCountdown(null)
+        handleRip()
+      }, 0)
+      return () => clearTimeout(timer)
+    }
+    const timer = setTimeout(() => setAutoRipCountdown((c) => (c === null ? null : c - 1)), 1000)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-fires only on the countdown tick, not on every handleRip identity change
+  }, [autoRipCountdown])
+
+  const cancelAutoRip = () => setAutoRipCountdown(null)
+
+  // After a batch-started job finishes (success or failure — either way
+  // the drive is free), eject automatically so the next disc can go in.
+  useEffect(() => {
+    if (!autoEjectJobIdRef.current) return
+    const finished = recentJobs.find(j => j.jobId === autoEjectJobIdRef.current)
+    if (!finished) return
+
+    autoEjectJobIdRef.current = null
+    const timer = setTimeout(() => {
+      handleEject()
+    }, 2000)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleEject is stable enough in practice; re-running this on its identity change would risk double-firing the eject timer
+  }, [recentJobs])
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -523,6 +632,10 @@ export function RipPage() {
         onEject={handleEject}
         isRipping={isRipping}
         standbyMessage={standbyMessage}
+        batchModeEnabled={batchModeEnabled}
+        onToggleBatchMode={setBatchModeEnabled}
+        autoRipCountdown={autoRipCountdown}
+        onCancelAutoRip={cancelAutoRip}
       />
     </div>
   )

@@ -12,6 +12,14 @@ export function registerAudioHandlers(): void {
     return musicBrainzService.lookupByDiscId(discId)
   })
 
+  ipcMain.handle(IPC.MUSICBRAINZ_LOOKUP_CANDIDATES, async (_event, discId: string) => {
+    return musicBrainzService.lookupByDiscIdAll(discId)
+  })
+
+  ipcMain.handle(IPC.MUSICBRAINZ_LOOKUP_BY_ID, async (_event, releaseId: string) => {
+    return musicBrainzService.lookupById(releaseId)
+  })
+
   ipcMain.handle(IPC.MUSICBRAINZ_SEARCH, async (_event, query: string) => {
     return musicBrainzService.search(query)
   })
@@ -29,11 +37,14 @@ export function registerAudioHandlers(): void {
     year: string
     discNumber: number
     totalDiscs: number
-    tracks: Array<{ number: number; title: string; artist: string }>
+    tracks: Array<{ number: number; title: string; artist: string; recordingId?: string }>
     mbReleaseId: string | null
     isVariousArtists: boolean
     coverArtPath: string | null
     devicePath?: string
+    albumArtistId?: string | null
+    genre?: string | null
+    discId?: string | null
   }) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return { error: 'No window found' }

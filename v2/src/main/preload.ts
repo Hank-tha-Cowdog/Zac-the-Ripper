@@ -24,7 +24,7 @@ const api = {
     onStateUpdate: (cb: (state: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: unknown) => cb(state)
       ipcRenderer.on(IPC.PREVIEW_STATE_UPDATE, handler)
-      return () => ipcRenderer.removeListener(IPC.PREVIEW_STATE_UPDATE, handler)
+      return () => { ipcRenderer.removeListener(IPC.PREVIEW_STATE_UPDATE, handler) }
     }
   },
 
@@ -35,17 +35,17 @@ const api = {
     onProgress: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.RIP_PROGRESS, handler)
-      return () => ipcRenderer.removeListener(IPC.RIP_PROGRESS, handler)
+      return () => { ipcRenderer.removeListener(IPC.RIP_PROGRESS, handler) }
     },
     onComplete: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.RIP_COMPLETE, handler)
-      return () => ipcRenderer.removeListener(IPC.RIP_COMPLETE, handler)
+      return () => { ipcRenderer.removeListener(IPC.RIP_COMPLETE, handler) }
     },
     onError: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.RIP_ERROR, handler)
-      return () => ipcRenderer.removeListener(IPC.RIP_ERROR, handler)
+      return () => { ipcRenderer.removeListener(IPC.RIP_ERROR, handler) }
     }
   },
 
@@ -56,17 +56,17 @@ const api = {
     onProgress: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.ENCODE_PROGRESS, handler)
-      return () => ipcRenderer.removeListener(IPC.ENCODE_PROGRESS, handler)
+      return () => { ipcRenderer.removeListener(IPC.ENCODE_PROGRESS, handler) }
     },
     onComplete: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.ENCODE_COMPLETE, handler)
-      return () => ipcRenderer.removeListener(IPC.ENCODE_COMPLETE, handler)
+      return () => { ipcRenderer.removeListener(IPC.ENCODE_COMPLETE, handler) }
     },
     onError: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.ENCODE_ERROR, handler)
-      return () => ipcRenderer.removeListener(IPC.ENCODE_ERROR, handler)
+      return () => { ipcRenderer.removeListener(IPC.ENCODE_ERROR, handler) }
     }
   },
 
@@ -74,7 +74,12 @@ const api = {
   jobs: {
     list: () => ipcRenderer.invoke(IPC.JOB_LIST),
     getStatus: (jobId: string) => ipcRenderer.invoke(IPC.JOB_STATUS, jobId),
-    cancel: (jobId: string) => ipcRenderer.invoke(IPC.JOB_CANCEL, jobId)
+    cancel: (jobId: string) => ipcRenderer.invoke(IPC.JOB_CANCEL, jobId),
+    onCreated: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.JOB_CREATED, handler)
+      return () => { ipcRenderer.removeListener(IPC.JOB_CREATED, handler) }
+    }
   },
 
   // Settings
@@ -93,6 +98,7 @@ const api = {
     },
     jobs: {
       list: (filters?: unknown) => ipcRenderer.invoke(IPC.DB_JOBS_LIST, filters),
+      count: (filters?: unknown) => ipcRenderer.invoke(IPC.DB_JOBS_COUNT, filters),
       get: (id: number) => ipcRenderer.invoke(IPC.DB_JOBS_GET, id),
       recent: (limit?: number) => ipcRenderer.invoke(IPC.DB_JOBS_RECENT, limit)
     },
@@ -148,23 +154,25 @@ const api = {
     onProgress: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.AUDIO_PROGRESS, handler)
-      return () => ipcRenderer.removeListener(IPC.AUDIO_PROGRESS, handler)
+      return () => { ipcRenderer.removeListener(IPC.AUDIO_PROGRESS, handler) }
     },
     onComplete: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.AUDIO_COMPLETE, handler)
-      return () => ipcRenderer.removeListener(IPC.AUDIO_COMPLETE, handler)
+      return () => { ipcRenderer.removeListener(IPC.AUDIO_COMPLETE, handler) }
     },
     onError: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.AUDIO_ERROR, handler)
-      return () => ipcRenderer.removeListener(IPC.AUDIO_ERROR, handler)
+      return () => { ipcRenderer.removeListener(IPC.AUDIO_ERROR, handler) }
     }
   },
 
   // MusicBrainz
   musicbrainz: {
     lookup: (discId: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_LOOKUP, discId),
+    lookupCandidates: (discId: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_LOOKUP_CANDIDATES, discId),
+    lookupById: (releaseId: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_LOOKUP_BY_ID, releaseId),
     search: (query: string) => ipcRenderer.invoke(IPC.MUSICBRAINZ_SEARCH, query),
     downloadCoverArt: (releaseId: string, destPath: string) =>
       ipcRenderer.invoke(IPC.MUSICBRAINZ_COVER_ART, releaseId, destPath)
@@ -181,7 +189,7 @@ const api = {
     onEntry: (callback: (data: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(IPC.LOG_ENTRY, handler)
-      return () => ipcRenderer.removeListener(IPC.LOG_ENTRY, handler)
+      return () => { ipcRenderer.removeListener(IPC.LOG_ENTRY, handler) }
     }
   }
 }

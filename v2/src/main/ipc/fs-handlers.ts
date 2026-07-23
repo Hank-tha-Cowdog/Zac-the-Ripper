@@ -1,6 +1,7 @@
 import { ipcMain, dialog, shell } from 'electron'
 import { IPC } from '../../shared/ipc-channels'
 import { statfs } from 'fs/promises'
+import { existsSync } from 'fs'
 
 export function registerFsHandlers(): void {
   ipcMain.handle(IPC.FS_SELECT_DIRECTORY, async (_event, title?: string) => {
@@ -56,6 +57,13 @@ export function registerFsHandlers(): void {
   })
 
   ipcMain.handle(IPC.FS_OPEN_PATH, async (_event, path: string) => {
+    // Currently only called with app-generated output_files.file_path
+    // values, but this is the IPC boundary — validate here regardless of
+    // what today's one caller happens to pass, rather than handing
+    // whatever string the renderer sends straight to a native OS call.
+    if (!path || typeof path !== 'string' || !existsSync(path)) {
+      return 'Path does not exist'
+    }
     return shell.openPath(path)
   })
 }

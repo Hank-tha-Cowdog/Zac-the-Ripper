@@ -15,6 +15,8 @@ export interface MBTrack {
   title: string
   artist: string
   durationMs: number
+  /** Recording MBID — tagged as MUSICBRAINZ_TRACKID (Picard convention). Empty string if unavailable. */
+  recordingId: string
 }
 
 export interface MusicBrainzRelease {
@@ -28,6 +30,43 @@ export interface MusicBrainzRelease {
   tracks: MBTrack[]
   isVariousArtists: boolean
   coverArtUrl: string | null
+  /** Primary album artist MBID — tagged as MUSICBRAINZ_ALBUMARTISTID. Null if unavailable. */
+  albumArtistId: string | null
+  /** Highest-vote-count genre name (release-level, falling back to the primary artist's genres). Null if none found. */
+  genre: string | null
+}
+
+interface RawGenre {
+  name: string
+  count: number
+}
+
+interface RawMBRelease {
+  id: string
+  title: string
+  date?: string
+  genres?: RawGenre[]
+  'artist-credit'?: Array<{ name: string; artist: { id: string; name: string; genres?: RawGenre[] } }>
+  media?: Array<{
+    position: number
+    'disc-count'?: number
+    tracks?: Array<{
+      number: string
+      title: string
+      length: number
+      'artist-credit'?: Array<{ name: string; artist: { name: string } }>
+      recording?: { id: string; title: string; 'artist-credit'?: Array<{ name: string }> }
+    }>
+  }>
+}
+
+/** Picks the highest-vote-count genre name, preferring release-level tags over the primary artist's. */
+function pickTopGenre(release: RawMBRelease): string | null {
+  const releaseGenres = release.genres || []
+  const artistGenres = release['artist-credit']?.[0]?.artist.genres || []
+  const source = releaseGenres.length > 0 ? releaseGenres : artistGenres
+  if (source.length === 0) return null
+  return [...source].sort((a, b) => b.count - a.count)[0].name
 }
 
 // Rate limiter: MusicBrainz requires max 1 request/sec
@@ -39,6 +78,11 @@ async function rateLimitWait(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 1100 - elapsed))
   }
   lastRequestTime = Date.now()
+}
+
+/** Test-only: this module-level timestamp otherwise bleeds a real ~1.1s wait into whichever test runs next. */
+export function _resetRateLimitForTesting(): void {
+  lastRequestTime = 0
 }
 
 export class MusicBrainzService {
@@ -109,84 +153,104 @@ export class MusicBrainzService {
     return discId
   }
 
-  async lookupByDiscId(discId: string): Promise<MusicBrainzRelease | null> {
-    const url = `${MB_BASE}/discid/${discId}?fmt=json&inc=artist-credits+recordings`
-    log.info(`lookupByDiscId: ${discId}`)
+  /**
+   * A single physical disc ID frequently maps to MULTIPLE MusicBrainz
+   * releases (different countries/labels/reissues sharing an identical
+   * TOC). Returns every match so the caller can disambiguate instead of
+   * silently guessing — previously only `releases[0]` was ever used
+   * ("Usually the matched disc is first"), which regularly attached the
+   * wrong pressing's metadata to a rip.
+   */
+  async lookupByDiscIdAll(discId: string): Promise<MusicBrainzRelease[]> {
+    const url = `${MB_BASE}/discid/${discId}?fmt=json&inc=artist-credits+recordings+genres`
+    log.info(`lookupByDiscIdAll: ${discId}`)
 
     try {
-      const data = await this.fetchJson(url) as {
-        releases?: Array<{
-          id: string
-          title: string
-          date?: string
-          'artist-credit'?: Array<{ name: string; artist: { name: string } }>
-          media?: Array<{
-            position: number
-            'disc-count'?: number
-            tracks?: Array<{
-              number: string
-              title: string
-              length: number
-              'artist-credit'?: Array<{ name: string; artist: { name: string } }>
-              recording?: { title: string; 'artist-credit'?: Array<{ name: string }> }
-            }>
-          }>
-        }>
-      }
+      const data = await this.fetchJson(url) as { releases?: RawMBRelease[] }
 
       if (!data.releases || data.releases.length === 0) {
-        log.info(`lookupByDiscId: no releases found for ${discId}`)
+        log.info(`lookupByDiscIdAll: no releases found for ${discId}`)
+        return []
+      }
+
+      const results = data.releases.map(release => this.parseRelease(release))
+      log.info(`lookupByDiscIdAll: ${results.length} candidate release(s) for ${discId}`)
+      return results
+    } catch (err) {
+      log.warn(`lookupByDiscIdAll failed: ${err}`)
+      return []
+    }
+  }
+
+  /** Convenience wrapper for callers that just want a best-effort single match. */
+  async lookupByDiscId(discId: string): Promise<MusicBrainzRelease | null> {
+    const results = await this.lookupByDiscIdAll(discId)
+    return results[0] || null
+  }
+
+  /** Fetch full release detail (including the track list) by MusicBrainz release ID. */
+  async lookupById(releaseId: string): Promise<MusicBrainzRelease | null> {
+    const url = `${MB_BASE}/release/${releaseId}?fmt=json&inc=artist-credits+recordings+genres`
+    log.info(`lookupById: ${releaseId}`)
+
+    try {
+      const release = await this.fetchJson(url) as RawMBRelease
+      if (!release.id) {
+        log.warn(`lookupById: no release found for ${releaseId}`)
         return null
       }
-
-      // Use the first release
-      const release = data.releases[0]
-      const artistCredits = release['artist-credit'] || []
-      const albumArtist = artistCredits.map(ac => ac.name).join('') || 'Unknown Artist'
-      const year = (release.date || '').split('-')[0] || ''
-
-      // Find the matching medium (disc)
-      const media = release.media || []
-      const medium = media[0] // Usually the matched disc is first
-      const discNumber = medium?.position || 1
-      const totalDiscs = media.length || 1
-
-      // Parse tracks
-      const rawTracks = medium?.tracks || []
-      const tracks: MBTrack[] = rawTracks.map((t, i) => {
-        const trackArtist = t['artist-credit']?.map(ac => ac.name).join('')
-          || t.recording?.['artist-credit']?.map(ac => ac.name).join('')
-          || albumArtist
-        return {
-          number: parseInt(t.number) || (i + 1),
-          title: t.title || t.recording?.title || `Track ${i + 1}`,
-          artist: trackArtist,
-          durationMs: t.length || 0
-        }
-      })
-
-      // Detect Various Artists: check if any track artist differs from album artist
-      const uniqueArtists = new Set(tracks.map(t => t.artist))
-      const isVariousArtists = uniqueArtists.size > 1 && albumArtist === 'Various Artists'
-
-      const result: MusicBrainzRelease = {
-        id: release.id,
-        title: release.title || 'Unknown Album',
-        artist: isVariousArtists ? 'Various Artists' : albumArtist,
-        albumArtist: isVariousArtists ? 'Various Artists' : albumArtist,
-        year,
-        discNumber,
-        totalDiscs,
-        tracks,
-        isVariousArtists,
-        coverArtUrl: `${COVER_ART_BASE}/release/${release.id}/front-500`
-      }
-
-      log.info(`lookupByDiscId: found "${result.title}" by ${result.artist} (${result.year}) — ${tracks.length} tracks`)
+      const result = this.parseRelease(release)
+      log.info(`lookupById: found "${result.title}" by ${result.artist} — ${result.tracks.length} tracks`)
       return result
     } catch (err) {
-      log.warn(`lookupByDiscId failed: ${err}`)
+      log.warn(`lookupById failed: ${err}`)
       return null
+    }
+  }
+
+  private parseRelease(release: RawMBRelease): MusicBrainzRelease {
+    const artistCredits = release['artist-credit'] || []
+    const albumArtist = artistCredits.map(ac => ac.name).join('') || 'Unknown Artist'
+    const year = (release.date || '').split('-')[0] || ''
+
+    // Find the matching medium (disc)
+    const media = release.media || []
+    const medium = media[0] // Usually the matched disc is first
+    const discNumber = medium?.position || 1
+    const totalDiscs = media.length || 1
+
+    // Parse tracks
+    const rawTracks = medium?.tracks || []
+    const tracks: MBTrack[] = rawTracks.map((t, i) => {
+      const trackArtist = t['artist-credit']?.map(ac => ac.name).join('')
+        || t.recording?.['artist-credit']?.map(ac => ac.name).join('')
+        || albumArtist
+      return {
+        number: parseInt(t.number) || (i + 1),
+        title: t.title || t.recording?.title || `Track ${i + 1}`,
+        artist: trackArtist,
+        durationMs: t.length || 0,
+        recordingId: t.recording?.id || ''
+      }
+    })
+
+    // Detect Various Artists: check if any track artist differs from album artist
+    const uniqueArtists = new Set(tracks.map(t => t.artist))
+    const isVariousArtists = uniqueArtists.size > 1 && albumArtist === 'Various Artists'
+
+    return {
+      id: release.id,
+      title: release.title || 'Unknown Album',
+      artist: isVariousArtists ? 'Various Artists' : albumArtist,
+      albumArtist: isVariousArtists ? 'Various Artists' : albumArtist,
+      year,
+      discNumber,
+      totalDiscs,
+      tracks,
+      isVariousArtists,
+      coverArtUrl: `${COVER_ART_BASE}/release/${release.id}/front-500`,
+      albumArtistId: isVariousArtists ? null : (artistCredits[0]?.artist.id || null),
+      genre: pickTopGenre(release)
     }
   }
 
@@ -219,7 +283,12 @@ export class MusicBrainzService {
           totalDiscs: r.media?.length || 1,
           tracks: [],
           isVariousArtists: artist === 'Various Artists',
-          coverArtUrl: `${COVER_ART_BASE}/release/${r.id}/front-500`
+          coverArtUrl: `${COVER_ART_BASE}/release/${r.id}/front-500`,
+          // This search endpoint returns album-level stubs only — MBIDs/genre
+          // aren't requested here, since callers fetch the full release via
+          // lookupById() (which populates both) once the user picks a result.
+          albumArtistId: null,
+          genre: null
         }
       })
     } catch (err) {

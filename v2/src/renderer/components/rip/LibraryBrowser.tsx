@@ -62,12 +62,6 @@ export function LibraryBrowser({ isOpen, onClose, onSelect }: LibraryBrowserProp
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedCollection, setExpandedCollection] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (isOpen) {
-      loadLibrary()
-    }
-  }, [isOpen])
-
   const loadLibrary = async () => {
     setLoading(true)
     try {
@@ -79,6 +73,12 @@ export function LibraryBrowser({ isOpen, onClose, onSelect }: LibraryBrowserProp
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (isOpen) {
+      loadLibrary()
+    }
+  }, [isOpen])
 
   // Filter movies and collections by search query
   const filtered = useMemo(() => {

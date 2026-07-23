@@ -25,8 +25,8 @@ export function Tooltip({ content, children, position = 'top', inline = false, c
     timeoutRef.current = setTimeout(() => {
       if (!triggerRef.current) return
       const rect = triggerRef.current.getBoundingClientRect()
-      let x = rect.left + rect.width / 2
-      let y = position === 'bottom' ? rect.bottom + 8 : rect.top - 8
+      const x = rect.left + rect.width / 2
+      const y = position === 'bottom' ? rect.bottom + 8 : rect.top - 8
       setCoords({ x, y })
       setVisible(true)
     }, 300)

@@ -6,32 +6,32 @@ import { runProcess, type RunningProcess } from '../util/process-runner'
 import { getSetting } from '../database/queries/settings'
 import { findToolPath } from '../util/platform'
 import { createLogger } from '../util/logger'
+import { getJobTranscriptPath } from '../util/job-transcript'
+import { parseCDToc, type CDTrackInfo, type CDDiscInfo } from './cd-toc-parser'
+import { parseCdparanoiaProgressSector, cdparanoiaSectorToPercent } from './cdparanoia-progress'
+import { validateWavFile } from '../util/wav-validate'
 
 const execFileAsync = promisify(execFile)
 const log = createLogger('cd-ripper')
 
-export interface CDTrackInfo {
-  number: number
-  startSector: number
-  endSector: number
-  durationSeconds: number
-}
+export type { CDTrackInfo, CDDiscInfo }
 
-export interface CDDiscInfo {
-  trackCount: number
-  tracks: CDTrackInfo[]
-  leadOutSector: number
-  totalDurationSeconds: number
-  devicePath: string
-  /** LBA offsets for each track (1-indexed values), used for MusicBrainz disc ID */
-  trackOffsets: number[]
+export interface CDTrackFile {
+  trackNumber: number
+  filePath: string
 }
 
 export interface CDRipResult {
   success: boolean
+  /** @deprecated positional — use trackFiles, which survives a non-contiguous track selection */
   outputFiles: string[]
+  trackFiles: CDTrackFile[]
+  /** Tracks that failed after retries — a partial success, not a hard failure. */
+  skippedTracks: number[]
   error?: string
 }
+
+const MAX_TRACK_RETRIES = 2
 
 export class CDRipperService {
   private activeProcesses = new Map<string, RunningProcess>()
@@ -75,98 +75,55 @@ export class CDRipperService {
       }
 
       log.debug(`queryTOC stderr:\n${stderr}`)
-      return this.parseTOC(stderr, devicePath || '/dev/cdrom')
+      const info = parseCDToc(stderr, devicePath || '/dev/cdrom')
+      if (!info) {
+        log.warn('queryTOC: no tracks found in cdparanoia output')
+        return null
+      }
+      log.info(`queryTOC: ${info.trackCount} tracks, leadOut=${info.leadOutSector}, total=${info.totalDurationSeconds.toFixed(0)}s`)
+      return info
     } catch (err) {
       log.error(`queryTOC failed: ${err}`)
       return null
     }
   }
 
-  /**
-   * Parse cdparanoia -Q output.
-   * Format:
-   *   track  length    begin    copy pre ch
-   *   ===========================================================
-   *     1.   18000 [04:00.00]      150 [00:02.00]    no   no  2
-   *     2.   22350 [04:58.00]    18150 [04:02.00]    no   no  2
-   *   TOTAL  40200 [08:56.00]    (audio only)
-   */
-  private parseTOC(output: string, devicePath: string): CDDiscInfo | null {
-    const lines = output.split('\n')
-    const tracks: CDTrackInfo[] = []
-    let leadOutSector = 0
-    const trackOffsets: number[] = []
-
-    for (const line of lines) {
-      // Match track lines: "  1.   18000 [04:00.00]      150 [00:02.00]    no   no  2"
-      const trackMatch = line.match(/^\s*(\d+)\.\s+(\d+)\s+\[[\d:.]+\]\s+(\d+)\s+\[[\d:.]+\]/)
-      if (trackMatch) {
-        const number = parseInt(trackMatch[1])
-        const sectorLength = parseInt(trackMatch[2])
-        const startSector = parseInt(trackMatch[3])
-        const endSector = startSector + sectorLength - 1
-        const durationSeconds = sectorLength / 75 // 75 sectors per second for audio CDs
-
-        tracks.push({ number, startSector, endSector, durationSeconds })
-        trackOffsets.push(startSector)
-        continue
-      }
-
-      // Match TOTAL line: "TOTAL  40200 [08:56.00]    (audio only)"
-      const totalMatch = line.match(/TOTAL\s+(\d+)\s+\[[\d:.]+\]/)
-      if (totalMatch) {
-        // Lead-out sector = last track start + last track length
-        // Or compute from TOTAL length + first track offset
-        if (tracks.length > 0) {
-          const lastTrack = tracks[tracks.length - 1]
-          leadOutSector = lastTrack.endSector + 1
-        }
-      }
-    }
-
-    if (tracks.length === 0) {
-      log.warn('parseTOC: no tracks found in cdparanoia output')
-      return null
-    }
-
-    // If we didn't get leadOutSector from TOTAL, compute it
-    if (leadOutSector === 0 && tracks.length > 0) {
-      leadOutSector = tracks[tracks.length - 1].endSector + 1
-    }
-
-    const totalDurationSeconds = tracks.reduce((sum, t) => sum + t.durationSeconds, 0)
-
-    log.info(`parseTOC: ${tracks.length} tracks, leadOut=${leadOutSector}, total=${totalDurationSeconds.toFixed(0)}s`)
-    return {
-      trackCount: tracks.length,
-      tracks,
-      leadOutSector,
-      totalDurationSeconds,
-      devicePath,
-      trackOffsets
-    }
+  /** Drive read-offset correction in PCM samples (cdparanoia -O/--sample-offset), e.g. "+667" for many Plextor drives. */
+  private getDriveReadOffset(): string | null {
+    const raw = (getSetting('audio.drive_read_offset') || '').trim()
+    if (!raw || Number.isNaN(Number(raw))) return null
+    return raw
   }
 
   /**
-   * Rip a single track to WAV.
+   * Rip a single track to WAV, one attempt — no retry (see ripAllTracks for
+   * the retry wrapper). Requires the track's sector range (from queryTOC)
+   * for both live progress percentage and post-rip WAV size validation.
    */
   async ripTrack(params: {
     jobId: string
     trackNumber: number
     outputPath: string
+    startSector: number
+    endSector: number
     devicePath?: string
     onProgress?: (percentage: number) => void
   }): Promise<CDRipResult> {
     const cdparanoia = this.getCdparanoiaPath()
-    if (!cdparanoia) return { success: false, outputFiles: [], error: 'cdparanoia not found' }
+    if (!cdparanoia) return { success: false, outputFiles: [], trackFiles: [], skippedTracks: [params.trackNumber], error: 'cdparanoia not found' }
 
-    const { jobId, trackNumber, outputPath, devicePath, onProgress } = params
+    const { jobId, trackNumber, outputPath, startSector, endSector, devicePath, onProgress } = params
     const subJobId = `${jobId}_track${trackNumber}`
 
-    const args = ['-w', String(trackNumber), outputPath]
+    // -e forces progress output to stderr even though it's a pipe, not a
+    // TTY (cdparanoia otherwise silently drops progress reporting under
+    // stdio capture — see cdparanoia-progress.ts doc comment).
+    const args = ['-e', '-w', String(trackNumber), outputPath]
+    const driveOffset = this.getDriveReadOffset()
+    if (driveOffset) args.unshift('-O', driveOffset)
     if (devicePath) args.unshift('-d', devicePath)
 
-    log.info(`ripTrack: track ${trackNumber} → ${outputPath}`)
+    log.info(`ripTrack: track ${trackNumber} → ${outputPath}${driveOffset ? ` (offset ${driveOffset})` : ''}`)
 
     return new Promise((resolve) => {
       let lastActivity = Date.now()
@@ -178,20 +135,19 @@ export class CDRipperService {
           clearInterval(stallTimer)
           const proc = this.activeProcesses.get(subJobId)
           if (proc) proc.kill()
-          resolve({ success: false, outputFiles: [], error: `Stall detected ripping track ${trackNumber}` })
+          resolve({ success: false, outputFiles: [], trackFiles: [], skippedTracks: [trackNumber], error: `Stall detected ripping track ${trackNumber}` })
         }
       }, 15000)
 
       const proc = runProcess({
         command: cdparanoia,
         args,
+        transcriptPath: getJobTranscriptPath(subJobId, 'cdparanoia'),
         onStderr: (line) => {
           lastActivity = Date.now()
-          // cdparanoia progress: "##: -2 [read] @ 12345"
-          // or sector progress line with numbers
-          const sectorMatch = line.match(/\(== PROGRESS ==\)\s+\[(\d+)\.\d+%\]/)
-          if (sectorMatch && onProgress) {
-            onProgress(parseFloat(sectorMatch[1]))
+          const sector = parseCdparanoiaProgressSector(line)
+          if (sector !== null && onProgress) {
+            onProgress(cdparanoiaSectorToPercent(sector, startSector, endSector))
           }
           log.debug(`cdparanoia: ${line}`)
         },
@@ -203,12 +159,23 @@ export class CDRipperService {
           clearInterval(stallTimer)
           this.activeProcesses.delete(subJobId)
 
-          if (code === 0 || existsSync(outputPath)) {
-            log.info(`ripTrack: track ${trackNumber} completed`)
-            resolve({ success: true, outputFiles: [outputPath] })
+          // cdparanoia's exit code alone is not trustworthy — verified
+          // against its source that it exits 0 even when a track was
+          // skipped and unlinked after uncorrectable errors. The WAV
+          // file's own header + byte count is the real success signal.
+          const expectedSectors = endSector - startSector + 1
+          const validation = validateWavFile(outputPath, expectedSectors)
+
+          if (validation.valid) {
+            if (code !== 0) {
+              log.warn(`ripTrack: track ${trackNumber} exited ${code} but output validated OK (${validation.actualBytes} bytes) — treating as success`)
+            } else {
+              log.info(`ripTrack: track ${trackNumber} completed (${validation.actualBytes} bytes)`)
+            }
+            resolve({ success: true, outputFiles: [outputPath], trackFiles: [{ trackNumber, filePath: outputPath }], skippedTracks: [] })
           } else {
-            log.error(`ripTrack: track ${trackNumber} failed with code ${code}`)
-            resolve({ success: false, outputFiles: [], error: `cdparanoia exit code ${code}` })
+            log.error(`ripTrack: track ${trackNumber} failed validation: ${validation.reason} (exit code ${code})`)
+            resolve({ success: false, outputFiles: [], trackFiles: [], skippedTracks: [trackNumber], error: validation.reason || `cdparanoia exit code ${code}` })
           }
         }
       })
@@ -219,6 +186,9 @@ export class CDRipperService {
 
   /**
    * Rip all selected tracks sequentially, reporting overall progress.
+   * Retries a failing track up to MAX_TRACK_RETRIES times before giving up
+   * on it and continuing with the rest of the album — a single damaged
+   * track (or a transient drive hiccup) no longer aborts the whole rip.
    */
   async ripAllTracks(params: {
     jobId: string
@@ -230,9 +200,24 @@ export class CDRipperService {
     const { jobId, trackNumbers, outputDir, devicePath, onProgress } = params
     const totalTracks = trackNumbers.length
     const outputFiles: string[] = []
+    const trackFiles: CDTrackFile[] = []
+    const skippedTracks: number[] = []
+
+    const toc = await this.queryTOC(devicePath)
+    if (!toc) {
+      return { success: false, outputFiles, trackFiles, skippedTracks: trackNumbers, error: 'Could not read disc table of contents' }
+    }
+    const trackInfoByNumber = new Map(toc.tracks.map(t => [t.number, t]))
 
     for (let i = 0; i < totalTracks; i++) {
       const trackNum = trackNumbers[i]
+      const trackInfo = trackInfoByNumber.get(trackNum)
+      if (!trackInfo) {
+        log.error(`ripAllTracks: track ${trackNum} not found in disc TOC — skipping`)
+        skippedTracks.push(trackNum)
+        continue
+      }
+
       const outputPath = join(outputDir, `${String(trackNum).padStart(2, '0')}.wav`)
 
       onProgress?.(
@@ -240,25 +225,44 @@ export class CDRipperService {
         `Ripping track ${i + 1}/${totalTracks}`
       )
 
-      const result = await this.ripTrack({
-        jobId,
-        trackNumber: trackNum,
-        outputPath,
-        devicePath,
-        onProgress: (trackPct) => {
-          const overall = ((i + trackPct / 100) / totalTracks) * 100
-          onProgress?.(overall, `Ripping track ${i + 1}/${totalTracks}: ${trackPct.toFixed(0)}%`)
+      let result: CDRipResult | null = null
+      for (let attempt = 0; attempt <= MAX_TRACK_RETRIES; attempt++) {
+        if (attempt > 0) {
+          log.warn(`ripAllTracks: retrying track ${trackNum} (attempt ${attempt + 1}/${MAX_TRACK_RETRIES + 1})`)
+          onProgress?.((i / totalTracks) * 100, `Ripping track ${i + 1}/${totalTracks} (retry ${attempt}/${MAX_TRACK_RETRIES})`)
         }
-      })
 
-      if (!result.success) {
-        return { success: false, outputFiles, error: result.error }
+        result = await this.ripTrack({
+          jobId,
+          trackNumber: trackNum,
+          outputPath,
+          startSector: trackInfo.startSector,
+          endSector: trackInfo.endSector,
+          devicePath,
+          onProgress: (trackPct) => {
+            const overall = ((i + trackPct / 100) / totalTracks) * 100
+            onProgress?.(overall, `Ripping track ${i + 1}/${totalTracks}: ${trackPct.toFixed(0)}%`)
+          }
+        })
+
+        if (result.success) break
+      }
+
+      if (!result || !result.success) {
+        log.error(`ripAllTracks: track ${trackNum} failed after ${MAX_TRACK_RETRIES + 1} attempt(s) — skipping, continuing with remaining tracks`)
+        skippedTracks.push(trackNum)
+        continue
       }
 
       outputFiles.push(outputPath)
+      trackFiles.push({ trackNumber: trackNum, filePath: outputPath })
     }
 
-    return { success: true, outputFiles }
+    if (trackFiles.length === 0) {
+      return { success: false, outputFiles, trackFiles, skippedTracks, error: 'All tracks failed to rip' }
+    }
+
+    return { success: true, outputFiles, trackFiles, skippedTracks }
   }
 
   cancelJob(jobId: string): void {
@@ -269,6 +273,14 @@ export class CDRipperService {
         proc.kill()
         this.activeProcesses.delete(id)
       }
+    }
+  }
+
+  /** Kill every active cdparanoia process immediately — used on app quit. */
+  killAll(): void {
+    for (const [id, proc] of this.activeProcesses) {
+      proc.kill()
+      this.activeProcesses.delete(id)
     }
   }
 }

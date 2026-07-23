@@ -21,17 +21,9 @@ export interface JobProgress {
   posterUrl?: string
 }
 
-interface LogEntry {
-  timestamp: string
-  level: 'info' | 'warn' | 'error'
-  message: string
-  jobId?: string
-}
-
 interface JobsState {
   activeJobs: JobProgress[]
   recentJobs: JobProgress[]
-  logs: LogEntry[]
 
   addJob: (job: JobProgress) => void
   updateJobProgress: (jobId: string, updates: Partial<JobProgress>) => void
@@ -39,14 +31,11 @@ interface JobsState {
   failJob: (jobId: string, error: string) => void
   cancelJob: (jobId: string) => void
   loadRecentJobs: (jobs: JobProgress[]) => void
-  addLog: (entry: LogEntry) => void
-  clearLogs: () => void
 }
 
-export const useJobsStore = create<JobsState>((set, get) => ({
+export const useJobsStore = create<JobsState>((set) => ({
   activeJobs: [],
   recentJobs: [],
-  logs: [],
 
   addJob: (job) => set((state) => ({
     activeJobs: [...state.activeJobs, job]
@@ -65,7 +54,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     return {
       activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
       recentJobs: [
-        { ...job, status: 'completed', percentage: 100, outputFiles },
+        { ...job, status: 'completed' as const, percentage: 100, outputFiles },
         ...state.recentJobs
       ].slice(0, 50)
     }
@@ -78,7 +67,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     return {
       activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
       recentJobs: [
-        { ...job, status: 'failed', error },
+        { ...job, status: 'failed' as const, error },
         ...state.recentJobs
       ].slice(0, 50)
     }
@@ -93,11 +82,5 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     const inMemoryIds = new Set(state.recentJobs.map(j => j.dbId))
     const dbOnly = jobs.filter(j => !inMemoryIds.has(j.dbId))
     return { recentJobs: [...state.recentJobs, ...dbOnly].slice(0, 50) }
-  }),
-
-  addLog: (entry) => set((state) => ({
-    logs: [...state.logs, entry].slice(-1000)
-  })),
-
-  clearLogs: () => set({ logs: [] })
+  })
 }))

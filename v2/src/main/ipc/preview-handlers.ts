@@ -4,6 +4,7 @@ import { getMpvService } from '../services/mpv-player'
 import { getDiscDetectionService } from '../services/disc-detection'
 import { findToolPath } from '../util/platform'
 import { createLogger } from '../util/logger'
+import { safeSend } from '../util/safe-send'
 
 const log = createLogger('preview-handlers')
 const discService = getDiscDetectionService()
@@ -23,7 +24,14 @@ export function registerPreviewHandlers(): void {
     try {
       const drives = await discService.scanDrives()
       const drive = drives.find((d: { index: number }) => d.index === discIndex)
-      const devicePath = drive?.devicePath || (process.platform === 'darwin' ? '/dev/rdisk4' : `/dev/sr${discIndex}`)
+      if (!drive?.devicePath) {
+        // Previously guessed /dev/rdisk4 (macOS) or /dev/sr<index> (other
+        // platforms) here — an arbitrary, machine-specific device number
+        // that's wrong on most systems and would silently open/scan
+        // whatever happens to be at that path.
+        return { success: false, error: `No device path known for drive ${discIndex}`, player: 'none' }
+      }
+      const devicePath = drive.devicePath
 
       log.info(`Starting preview: disc=${discIndex} title=${titleIndex} device=${devicePath}`)
 
@@ -35,17 +43,23 @@ export function registerPreviewHandlers(): void {
       if (window && result.player === 'mpv') {
         // Push state updates to renderer every 250ms
         mpvService.onStateUpdate((state) => {
-          try {
-            window.webContents.send(IPC.PREVIEW_STATE_UPDATE, state)
-          } catch {}
+          safeSend(window, IPC.PREVIEW_STATE_UPDATE, state)
         })
 
         stateInterval = setInterval(() => {
-          try {
-            const state = mpvService.getPlaybackState()
-            window.webContents.send(IPC.PREVIEW_STATE_UPDATE, state)
-          } catch {}
+          const state = mpvService.getPlaybackState()
+          safeSend(window, IPC.PREVIEW_STATE_UPDATE, state)
         }, 250)
+
+        // Without this, closing the window mid-preview leaves the interval
+        // running forever (safeSend no-ops silently, so nothing ever surfaces
+        // the leak) until the next PREVIEW_STOP call, if one ever comes.
+        window.once('closed', () => {
+          if (stateInterval) {
+            clearInterval(stateInterval)
+            stateInterval = null
+          }
+        })
       }
 
       return { success: true, player: result.player }

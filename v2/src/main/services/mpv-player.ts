@@ -82,7 +82,11 @@ export class MpvPlayerService {
 
     // Clean up stale socket
     if (existsSync(this.socketPath)) {
-      try { unlinkSync(this.socketPath) } catch {}
+      try {
+        unlinkSync(this.socketPath)
+      } catch {
+        // Socket already gone — fine, that's the goal
+      }
     }
 
     const args = [
@@ -414,11 +418,18 @@ export class MpvPlayerService {
     if (this.process) {
       try {
         this.process.kill('SIGTERM')
-      } catch {}
-      // Force kill after 2 seconds
+      } catch {
+        // Process already exited
+      }
+      // Force kill after 2 seconds if SIGTERM didn't finish the job. Harmless
+      // no-op (caught below) if the process already exited cleanly.
       const proc = this.process
       setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch {}
+        try {
+          proc.kill('SIGKILL')
+        } catch {
+          // Already exited
+        }
       }, 2000)
     }
 
@@ -434,7 +445,11 @@ export class MpvPlayerService {
     this.pendingRequests.clear()
 
     if (this.socket) {
-      try { this.socket.destroy() } catch {}
+      try {
+        this.socket.destroy()
+      } catch {
+        // Already closed
+      }
       this.socket = null
     }
 
@@ -444,7 +459,11 @@ export class MpvPlayerService {
 
     // Clean up socket file
     if (existsSync(this.socketPath)) {
-      try { unlinkSync(this.socketPath) } catch {}
+      try {
+        unlinkSync(this.socketPath)
+      } catch {
+        // Already gone
+      }
     }
   }
 }

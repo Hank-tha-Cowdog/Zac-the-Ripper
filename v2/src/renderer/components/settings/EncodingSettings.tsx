@@ -75,6 +75,8 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
                 />
                 <input
                   type="number"
+                  min="0"
+                  max="51"
                   className="input"
                   value={settings['encoding.h264_crf'] || '18'}
                   onChange={(e) => onSave('encoding.h264_crf', e.target.value)}
@@ -159,6 +161,8 @@ export function EncodingSettings({ settings, onSave }: EncodingSettingsProps) {
           />
           <input
             type="number"
+            min="0"
+            max="64"
             className="input"
             value={settings['encoding.ffv1_threads'] || '0'}
             onChange={(e) => onSave('encoding.ffv1_threads', e.target.value)}

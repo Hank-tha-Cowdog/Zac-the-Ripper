@@ -1,5 +1,6 @@
 import { registerDiscHandlers } from './disc-handlers'
 import { registerRipHandlers } from './rip-handlers'
+import { registerJobHandlers } from './job-handlers'
 import { registerEncodeHandlers } from './encode-handlers'
 import { registerSettingsHandlers } from './settings-handlers'
 import { registerFsHandlers } from './fs-handlers'
@@ -15,6 +16,7 @@ import { registerAudioHandlers } from './audio-handlers'
 export function registerAllIpcHandlers(): void {
   registerDiscHandlers()
   registerRipHandlers()
+  registerJobHandlers()
   registerEncodeHandlers()
   registerSettingsHandlers()
   registerFsHandlers()

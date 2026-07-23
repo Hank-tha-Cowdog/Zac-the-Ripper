@@ -11,7 +11,10 @@ interface ProgressBarProps {
 }
 
 export function ProgressBar({ value, color = 'purple', striped = false, className = '', showLabel = false }: ProgressBarProps) {
-  const clamped = Math.max(0, Math.min(100, value))
+  // Defense in depth: an invalid/missing percentage should read as "no
+  // progress yet," not render the literal text "NaN%" (Math.min/max
+  // propagate NaN straight through, and NaN.toFixed(1) is the string "NaN").
+  const clamped = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0
 
   return (
     <div className={`${className}`}>

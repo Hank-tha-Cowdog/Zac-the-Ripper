@@ -6,10 +6,6 @@ import { TechLabel, Tooltip } from '../ui'
 export function SystemStatusBar() {
   const { toolStatuses, setToolStatuses, diskSpace, setDiskSpace } = useAppStore()
 
-  useEffect(() => {
-    loadStatus()
-  }, [])
-
   const loadStatus = async () => {
     try {
       const tools = await window.ztr.tools.check()
@@ -31,6 +27,10 @@ export function SystemStatusBar() {
       // Disk space might not be readable
     }
   }
+
+  useEffect(() => {
+    loadStatus()
+  }, [])
 
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return '0 B'

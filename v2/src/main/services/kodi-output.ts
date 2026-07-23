@@ -1,8 +1,16 @@
-import { mkdirSync, writeFileSync, copyFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, copyFileSync, existsSync, constants as fsConstants } from 'fs'
 import { join, basename, extname } from 'path'
 import { createLogger } from '../util/logger'
 
 const log = createLogger('kodi-output')
+
+// Hints the filesystem to do a copy-on-write clone instead of a full byte
+// copy on APFS (macOS)/btrfs/XFS-reflink — turns copying a multi-GB rip
+// into a near-instant, near-zero-extra-disk-space operation instead of
+// doubling read+write I/O and disk usage per library target. Silently
+// falls back to a normal copy on filesystems that don't support it (e.g.
+// exFAT/NTFS network shares), so this is always safe to pass.
+const CLONE_IF_SUPPORTED = fsConstants.COPYFILE_FICLONE
 
 /**
  * Sanitize a title for use in filesystem paths.
@@ -10,7 +18,7 @@ const log = createLogger('kodi-output')
  * Forward slashes are replaced with a hyphen-space to preserve readability
  * (e.g., "Fahrenheit 9/11" → "Fahrenheit 9-11").
  */
-function sanitizeTitle(title: string): string {
+export function sanitizeTitle(title: string): string {
   return title
     .replace(/\//g, '-')           // forward slash → hyphen
     .replace(/\\/g, '-')           // backslash → hyphen
@@ -145,16 +153,36 @@ export const EXTRAS_FOLDER_MAP: Record<string, string> = {
 export class KodiOutputService {
 
   /**
+   * The movie folder name, shared by buildMoviePath and finalizeMovie so
+   * they can never compute it differently and land the video file and its
+   * NFO/artwork in different folders.
+   *
+   * plexIdTag, when given, is appended as Plex's documented exact-match
+   * hint syntax (verified against Plex's own movie-naming docs and the
+   * TRaSH Guides naming reference): "{tmdb-12345}" or "{imdb-tt0372784}",
+   * e.g. "Title (2020) {tmdb-12345}". Ripped-disc titles are exactly the
+   * messy/ambiguous case Plex's automatic matcher struggles with, so this
+   * meaningfully reduces mismatches — but it's only ever passed for a
+   * target actually going to a Plex library, never Kodi/Jellyfin (which
+   * match via each NFO's <uniqueid> tags instead).
+   */
+  private computeFolderName(title: string, year: number, plexIdTag?: string): string {
+    const safeTitle = sanitizeTitle(title)
+    const base = `${safeTitle} (${year})`
+    return plexIdTag ? `${base} ${plexIdTag}` : base
+  }
+
+  /**
    * Compute the Kodi directory and video file path WITHOUT creating anything.
    * Call this before encoding to know where FFmpeg should write its output.
    */
   buildMoviePath(params: {
     libraryPath: string; title: string; year: number
     edition?: string; soundVersion?: string; discNumber?: number; totalDiscs?: number; isExtrasDisc?: boolean
+    plexIdTag?: string
   }): { outputDir: string; videoPath: string } {
-    const { libraryPath, title, year, edition, soundVersion, discNumber, totalDiscs, isExtrasDisc } = params
-    const safeTitle = sanitizeTitle(title)
-    const folderName = `${safeTitle} (${year})`
+    const { libraryPath, title, year, edition, soundVersion, discNumber, totalDiscs, isExtrasDisc, plexIdTag } = params
+    const folderName = this.computeFolderName(title, year, plexIdTag)
     const outputDir = join(libraryPath, 'Movies', folderName)
 
     if (isExtrasDisc) {
@@ -174,12 +202,11 @@ export class KodiOutputService {
    * Write NFO, copy artwork, and create category folders.
    * Called AFTER the video file has been written to videoPath by FFmpeg.
    */
-  finalizeMovie(params: KodiMovieParams & { videoAlreadyAtPath: string; soundVersion?: string; totalDiscs?: number }): { nfoPath: string } {
-    const { libraryPath, title, year, artwork, edition, isExtrasDisc, videoAlreadyAtPath, discNumber } = params
+  finalizeMovie(params: KodiMovieParams & { videoAlreadyAtPath: string; soundVersion?: string; totalDiscs?: number; plexIdTag?: string }): { nfoPath: string } {
+    const { libraryPath, title, year, artwork, edition, isExtrasDisc, videoAlreadyAtPath, discNumber, plexIdTag } = params
     const soundVersion = (params as { soundVersion?: string }).soundVersion
     const totalDiscs = (params as { totalDiscs?: number }).totalDiscs
-    const safeTitle = sanitizeTitle(title)
-    const folderName = `${safeTitle} (${year})`
+    const folderName = this.computeFolderName(title, year, plexIdTag)
     const outputDir = join(libraryPath, 'Movies', folderName)
 
     // For extras disc, no NFO needed
@@ -215,62 +242,8 @@ export class KodiOutputService {
     return { nfoPath }
   }
 
-  exportMovie(params: KodiMovieParams & { soundVersion?: string; totalDiscs?: number }): { outputDir: string; nfoPath: string; moviePath: string } {
-    const { libraryPath, title, year, sourceFile, artwork, edition, isExtrasDisc, discNumber } = params
-    const soundVersion = (params as { soundVersion?: string }).soundVersion
-    const totalDiscs = (params as { totalDiscs?: number }).totalDiscs
-
-    // Folder is always "Movies/Title (Year)/" — no edition in folder name
-    // This groups all versions under one Kodi library entry
-    const safeTitle = sanitizeTitle(title)
-    const folderName = `${safeTitle} (${year})`
-    const outputDir = join(libraryPath, 'Movies', folderName)
-    mkdirSync(outputDir, { recursive: true })
-
-    const ext = extname(sourceFile) || '.mkv'
-
-    // Extras disc: route to Featurettes/ subfolder (Plex + Jellyfin convention)
-    if (isExtrasDisc) {
-      const featurettesDir = join(outputDir, 'Featurettes')
-      mkdirSync(featurettesDir, { recursive: true })
-      const extrasName = edition ? `${edition}${ext}` : `Extras${ext}`
-      const moviePath = join(featurettesDir, extrasName)
-      copyFileSync(sourceFile, moviePath)
-      log.info(`Exported extras disc to: ${featurettesDir}`)
-      return { outputDir: featurettesDir, nfoPath: '', moviePath }
-    }
-
-    // Build filename: "Title (Year) {edition-Director's Cut} - DTS-HD Master Audio - disc2.mkv"
-    let fileName = folderName
-    if (edition) fileName += ` {edition-${edition}}`
-    if (soundVersion) fileName += ` - ${soundVersion}`
-    if (discNumber && totalDiscs && totalDiscs > 1) fileName += ` - disc${discNumber}`
-
-    const moviePath = join(outputDir, `${fileName}${ext}`)
-    copyFileSync(sourceFile, moviePath)
-
-    // Generate NFO (named to match video file)
-    const nfoPath = join(outputDir, `${fileName}.nfo`)
-    writeFileSync(nfoPath, this.generateMovieNFO(params), 'utf-8')
-
-    // Copy artwork using Kodi short-name convention (only if not already present)
-    if (artwork) {
-      this.copyArtworkIfMissing(outputDir, artwork.poster, 'poster.jpg')
-      this.copyArtworkIfMissing(outputDir, artwork.fanart, 'fanart.jpg')
-      this.copyArtworkIfMissing(outputDir, artwork.banner, 'banner.jpg')
-      this.copyArtworkIfMissing(outputDir, artwork.clearlogo, 'clearlogo.png')
-      this.copyArtworkIfMissing(outputDir, artwork.clearart, 'clearart.png')
-      this.copyArtworkIfMissing(outputDir, artwork.landscape, 'landscape.jpg')
-      this.copyArtworkIfMissing(outputDir, artwork.discart, 'discart.png')
-      this.copyArtworkIfMissing(outputDir, artwork.keyart, 'keyart.jpg')
-    }
-
-    log.info(`Exported movie to: ${outputDir}`)
-    return { outputDir, nfoPath, moviePath }
-  }
-
-  exportTVShow(params: KodiShowNFOParams): { showDir: string; nfoPath: string } {
-    const { libraryPath, showName, year, artwork, seasonArtwork } = params
+  exportTVShow(params: KodiShowNFOParams & { isPlexTarget?: boolean }): { showDir: string; nfoPath: string } {
+    const { libraryPath, showName, year, artwork, seasonArtwork, isPlexTarget } = params
 
     const safeShowName = sanitizeTitle(showName)
     const showFolder = year ? `${safeShowName} (${year})` : safeShowName
@@ -280,6 +253,20 @@ export class KodiOutputService {
     // Generate tvshow.nfo
     const nfoPath = join(showDir, 'tvshow.nfo')
     writeFileSync(nfoPath, this.generateShowNFO(params), 'utf-8')
+
+    // Plex's automatic TV matcher is its own separate system from the
+    // NFO-based Kodi/Jellyfin scrapers — a <uniqueid> in tvshow.nfo means
+    // nothing to it. .plexmatch is Plex's own documented match-hinting
+    // mechanism (support.plex.tv/articles/plexmatch, verified format:
+    // line-delimited "key: value" pairs) for exactly this situation:
+    // ripped-show folder names that don't cleanly match Plex's online
+    // agent. Only written for a Plex target — Kodi/Jellyfin ignore it, but
+    // there's no reason to clutter their libraries with a file they'll
+    // never read.
+    if (isPlexTarget) {
+      const plexMatchPath = join(showDir, '.plexmatch')
+      writeFileSync(plexMatchPath, this.generatePlexMatch(params), 'utf-8')
+    }
 
     // Copy show-level artwork
     if (artwork) {
@@ -322,7 +309,7 @@ export class KodiOutputService {
     // Copy episode file
     const ext = extname(sourceFile) || '.mkv'
     const episodePath = join(seasonDir, `${baseName}${ext}`)
-    copyFileSync(sourceFile, episodePath)
+    copyFileSync(sourceFile, episodePath, CLONE_IF_SUPPORTED)
 
     // Generate episode NFO
     const nfoPath = join(seasonDir, `${baseName}.nfo`)
@@ -497,6 +484,22 @@ export class KodiOutputService {
     }
 
     lines.push('</tvshow>')
+    return lines.join('\n') + '\n'
+  }
+
+  /**
+   * .plexmatch content — verified line-delimited "key: value" format
+   * (support.plex.tv/articles/plexmatch). tmdbid/imdbid/tvdbid override
+   * title/year hints entirely when present, so they're included whenever
+   * available; title+year are always included as a fallback hint.
+   */
+  private generatePlexMatch(params: KodiShowNFOParams): string {
+    const { showName, year, metadata } = params
+    const lines: string[] = [`title: ${showName}`]
+    if (year) lines.push(`year: ${year}`)
+    if (metadata?.tvdb_id) lines.push(`tvdbid: ${metadata.tvdb_id}`)
+    if (metadata?.tmdb_id) lines.push(`tmdbid: ${metadata.tmdb_id}`)
+    if (metadata?.imdb_id) lines.push(`imdbid: ${metadata.imdb_id}`)
     return lines.join('\n') + '\n'
   }
 
