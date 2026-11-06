@@ -36,3 +36,8 @@ v2/*.exe
 # Logs
 *.log
 npm-debug.log*
+
+# Vendored tool binaries are never committed (licence and legal reasons).
+# Build them from source in CI and attach their source to releases instead.
+v2/vendor/bin/*/*/*
+!v2/vendor/bin/*/*/.gitkeep

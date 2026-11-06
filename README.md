@@ -2,8 +2,6 @@
 
 **A modern desktop app for ripping, encoding, and organizing physical media into your home media library.**
 
-![Zac the Ripper UI](00_media/readme_banner_001.png)
-
 ![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
